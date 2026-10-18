@@ -1,0 +1,1003 @@
+--- a/src/extensibility/extensions/types.ts
++++ b/src/extensibility/extensions/types.ts
+@@ -85,6 +85,7 @@
+ import type { Theme } from "@oh-my-pi/pi-tui/theme";
+ import type { NativeToolView } from "@oh-my-pi/pi-tui/tools/renderer";
+ import type { AsyncJobSnapshot, SendUserMessageOptions } from "../../session/agent-session";
++import type { AgentSessionEvent } from "../../session/agent-session-events";
+ import type { EphemeralTurnOptions, EphemeralTurnResult } from "../../session/agent-session-types";
+ import type { CompactMode } from "../../session/compact-modes";
+ import type { CustomMessagePayload } from "../../session/messages";
+@@ -1571,6 +1572,22 @@
+ /** Handler function type for events */
+ export type ExtensionHandler<E, R = undefined> = (event: E, ctx: ExtensionContext) => Promise<R | void> | R | void;
+ 
++/** Authoritative text proposed by a native write/edit before filesystem mutation. */
++export interface FileWriteGuardRequest {
++	/** Absolute destination; archive/SQLite subresources retain their suffix. */
++	readonly path: string;
++	readonly content: string;
++	readonly previousText?: string;
++	readonly operation: "write" | "edit";
++	readonly toolCallId: string;
++}
++
++/** Throwing rejects the mutation; guards run in registration order in their owning session. */
++export type FileWriteGuardHandler = (request: FileWriteGuardRequest, ctx: ExtensionContext) => void | Promise<void>;
++
++/** Synchronous display-only projection. Returning undefined suppresses the event. */
++export type OutputFilterHandler = (event: AgentSessionEvent, ctx: ExtensionContext) => AgentSessionEvent | undefined;
++
+ /** Service tiers accepted by each provider family. */
+ export type ExtensionServiceTier<Family extends ServiceTierFamily> = Family extends "anthropic"
+ 	? "priority"
+@@ -1686,6 +1703,17 @@
+ 	/** Register a tool that the LLM can call. */
+ 	registerTool<TParams extends TSchema = TSchema, TDetails = unknown>(tool: ToolDefinition<TParams, TDetails>): void;
+ 
++	/** Guard native write/edit text before any mutation. A rejection blocks the write. Session-scoped. */
++	registerFileWriteGuard(handler: FileWriteGuardHandler): void;
++
++	/**
++	 * Filter every live session display event before subscribers receive it.
++	 * Filters receive detached events, never agent/history objects. Returning undefined
++	 * or throwing suppresses the event. Must be synchronous; does not rewrite model
++	 * context or stored history. Registered filters also apply to transcript display.
++	 */
++	registerOutputFilter(handler: OutputFilterHandler): void;
++
+ 	/**
+ 	 * Register a fallback writer consulted when a native `write`/`edit` byte-write is
+ 	 * denied with a permission error (`EPERM`/`EACCES`/`EROFS`). Every other write
+@@ -2170,6 +2198,8 @@
+ 	tools: Map<string, RegisteredTool<any, any>>;
+ 	toolRegistrationListeners?: Set<ToolRegistrationListener>;
+ 	assistantThinkingRenderers: AssistantThinkingRenderer[];
++	fileWriteGuardHandlers?: FileWriteGuardHandler[];
++	outputFilterHandlers?: OutputFilterHandler[];
+ 	fileWriteFallbackHandlers: FileWriteFallbackHandler[];
+ 	fileDeleteFallbackHandlers: FileDeleteFallbackHandler[];
+ 	messageRenderers: Map<string, MessageRenderer>;
+@@ -2210,3 +2240,9 @@
+ 	error: string;
+ 	stack?: string;
+ }
++
++/** Trusted tool-result details for an approved, terminal user-facing reply. */
++export interface ExtensionReplyDetails {
++	displayAsReply?: boolean;
++	terminateTurn?: boolean;
++}
+--- a/src/extensibility/extensions/loader.ts
++++ b/src/extensibility/extensions/loader.ts
+@@ -44,6 +44,8 @@
+ 	Extension,
+ 	ExtensionAPI,
+ 	ExtensionContext,
++	FileWriteGuardHandler,
++	OutputFilterHandler,
+ 	ExtensionFactory,
+ 	ExtensionRuntime as IExtensionRuntime,
+ 	LoadExtensionsResult,
+@@ -223,6 +225,14 @@
+ 		for (const listener of this.extension.toolRegistrationListeners ?? []) listener(tool.name);
+ 	}
+ 
++	registerFileWriteGuard(handler: FileWriteGuardHandler): void {
++		(this.extension.fileWriteGuardHandlers ??= []).push(handler);
++	}
++
++	registerOutputFilter(handler: OutputFilterHandler): void {
++		(this.extension.outputFilterHandlers ??= []).push(handler);
++	}
++
+ 	registerFileWriteFallback(handler: FileWriteFallbackHandler): void {
+ 		this.extension.fileWriteFallbackHandlers.push(handler);
+ 	}
+@@ -379,6 +389,8 @@
+ 		tools: new Map(),
+ 		toolRegistrationListeners: new Set(),
+ 		assistantThinkingRenderers: [],
++		fileWriteGuardHandlers: [],
++		outputFilterHandlers: [],
+ 		fileWriteFallbackHandlers: [],
+ 		fileDeleteFallbackHandlers: [],
+ 		messageRenderers: new Map(),
+--- a/src/extensibility/extensions/runner.ts
++++ b/src/extensibility/extensions/runner.ts
+@@ -2,6 +2,7 @@
+  * Extension runner - executes extensions and manages their lifecycle.
+  */
+ import { AsyncLocalStorage } from "node:async_hooks";
++import { isPromise } from "node:util/types";
+ import {
+ 	type AgentMessage,
+ 	type AgentTool,
+@@ -36,6 +37,7 @@
+ import { type Theme, theme } from "@oh-my-pi/pi-tui/theme";
+ import type { AsyncJobSnapshot, SendUserMessageOptions } from "../../session/agent-session";
+ import { MAIN_AGENT_ID } from "../../registry/agent-registry";
++import type { AgentSessionEvent } from "../../session/agent-session-events";
+ import type { SessionManager } from "../../session/session-manager";
+ import { addFileDeleteFallback, addFileWriteFallback } from "../../tools/file-write-fallback";
+ import type { BranchHandler, NavigateTreeHandler, NewSessionHandler } from "../session-handler-types";
+@@ -75,6 +77,7 @@
+ 	ExtensionShortcut,
+ 	ExtensionUIContext,
+ 	ExtensionUIDialogOptions,
++	FileWriteGuardRequest,
+ 	InputEvent,
+ 	InputEventResult,
+ 	CacheWarmingAction,
+@@ -1106,6 +1109,53 @@
+ 		return { suspended, resumed };
+ 	}
+ 
++	hasFileWriteGuards(): boolean {
++		for (const ext of this.extensions) if (ext.fileWriteGuardHandlers?.length) return true;
++		return false;
++	}
++
++	/** Security gates deliberately propagate failures rather than treating them as notifications. */
++	async guardFileWrite(request: FileWriteGuardRequest): Promise<void> {
++		Object.freeze(request);
++		let ctx: ExtensionContext | undefined;
++		for (const ext of this.extensions) {
++			if (!ext.fileWriteGuardHandlers?.length) continue;
++			ctx ??= this.createContext();
++			for (const handler of ext.fileWriteGuardHandlers) await handler(request, ctx);
++		}
++	}
++
++	hasOutputFilters(): boolean {
++		for (const ext of this.extensions) if (ext.outputFilterHandlers?.length) return true;
++		return false;
++	}
++
++	/** No cloning or context creation on the unregistered hot path. Fail closed on every filter error. */
++	filterOutput(event: AgentSessionEvent): AgentSessionEvent | undefined {
++		if (!this.hasOutputFilters()) return event;
++		try {
++			let filtered: AgentSessionEvent | undefined = structuredClone(event);
++			const ctx = this.createContext();
++			for (const ext of this.extensions) {
++				if (!ext.outputFilterHandlers) continue;
++				for (const handler of ext.outputFilterHandlers) {
++					filtered = handler(filtered, ctx);
++					if (filtered === undefined) return undefined;
++					// Reject accidental async handlers rather than emitting a Promise.
++					if (isPromise(filtered)) {
++						void filtered.catch(() => {});
++						return undefined;
++					}
++					if (typeof filtered !== "object" || filtered === null || !("type" in filtered)) return undefined;
++				}
++			}
++			return filtered;
++		} catch {
++			// Error messages can themselves contain denied text. Do not forward or log them.
++			return undefined;
++		}
++	}
++
+ 	/** Get all registered tools from all extensions. */
+ 	getAllRegisteredTools(): RegisteredTool[] {
+ 		const tools: RegisteredTool[] = [];
+--- a/src/sdk.ts
++++ b/src/sdk.ts
+@@ -2369,6 +2369,10 @@
+ 			getClientBridge: () => session?.clientBridge,
+ 			emitBeforeSubagentSpawn: (event, signal) =>
+ 				session?.extensionRunner?.emitBeforeSubagentSpawn(event, signal) ?? Promise.resolve(undefined),
++			hasFileWriteGuards: () => session?.extensionRunner?.hasFileWriteGuards() ?? false,
++			guardFileWrite: async request => {
++				await session?.extensionRunner?.guardFileWrite(request);
++			},
+ 			queueDeferredDiagnostics: entry => session?.yieldQueue.enqueue(LSP_LATE_DIAGNOSTIC_MESSAGE_TYPE, entry),
+ 			queueLaunchCompletion: notification =>
+ 				session?.queueLaunchCompletion(notification) ??
+--- a/src/tools/index.ts
++++ b/src/tools/index.ts
+@@ -14,6 +14,7 @@
+ import type {
+ 	BeforeSubagentSpawnEvent,
+ 	BeforeSubagentSpawnEventResult,
++	FileWriteGuardRequest,
+ 	PreparedExtension,
+ } from "../extensibility/extensions/types";
+ import type { Skill } from "../extensibility/skills";
+@@ -221,6 +222,9 @@
+ 	settingsApproval?: boolean;
+ 	/** Whether this session has begun disposal. */
+ 	isDisposed?: () => boolean;
++	/** Session-owned native text mutation gates. Unregistered tools do no extra reads or allocations. */
++	hasFileWriteGuards?(): boolean;
++	guardFileWrite?(request: FileWriteGuardRequest): Promise<void>;
+ 	/**
+ 	 * Suppress the spawn specialization/coordination advisory appended to `task`
+ 	 * results. Set by internal/programmatic callers (e.g. the commit agent's
+--- a/src/tools/write.ts
++++ b/src/tools/write.ts
+@@ -557,6 +557,7 @@
+ 		contentBytes: number,
+ 		rawContent: string,
+ 		resolvedArchivePath: ResolvedArchiveWritePath,
++		toolCallId: string,
+ 	): Promise<AgentToolResult<WriteToolDetails>> {
+ 		// Resolve symlinks before the tmp+rename swap: renaming over a symlink
+ 		// replaces the link itself with a regular file instead of writing
+@@ -575,11 +576,6 @@
+ 		// crash/disk-full mid-write can't destroy the original archive.
+ 		const tmpPath = `${finalPath}.tmp-${process.pid}`;
+ 
+-		const parentDir = path.dirname(resolvedArchivePath.absolutePath);
+-		if (parentDir && parentDir !== ".") {
+-			await fs.mkdir(parentDir, { recursive: true });
+-		}
+-
+ 		const entries = new Map<string, ArchiveMemberContent>();
+ 		if (resolvedArchivePath.exists) {
+ 			try {
+@@ -603,6 +599,24 @@
+ 			const existingText = typeof existingBytes === "string" ? existingBytes : decodeUtf8Text(existingBytes);
+ 			assertNotShorterReadProjection(writeTarget, rawContent, existingText ?? undefined, content);
+ 		}
++		if (this.session.hasFileWriteGuards?.()) {
++			let previousText: string | undefined;
++			if (existingTarget !== undefined) {
++				const bytes = existingTarget instanceof Blob ? new Uint8Array(await existingTarget.arrayBuffer()) : existingTarget;
++				previousText = typeof bytes === "string" ? bytes : decodeUtf8Text(bytes) ?? undefined;
++			}
++			await this.session.guardFileWrite!({
++				path: `${resolvedArchivePath.absolutePath}:${resolvedArchivePath.archiveSubPath}`,
++				content,
++				previousText,
++				operation: "write",
++				toolCallId,
++			});
++		}
++		const parentDir = path.dirname(resolvedArchivePath.absolutePath);
++		if (parentDir && parentDir !== ".") {
++			await fs.mkdir(parentDir, { recursive: true });
++		}
+ 		entries.set(resolvedArchivePath.archiveSubPath, content);
+ 
+ 		try {
+@@ -684,8 +698,17 @@
+ 		displayPath: string,
+ 		content: string,
+ 		resolvedSqlitePath: ResolvedSqliteWritePath,
++		toolCallId: string,
+ 	): Promise<AgentToolResult<WriteToolDetails>> {
+ 		let db: Database | null = null;
++		if (this.session.hasFileWriteGuards?.()) {
++			await this.session.guardFileWrite!({
++				path: `${resolvedSqlitePath.absolutePath}:${resolvedSqlitePath.table}`,
++				content,
++				operation: "write",
++				toolCallId,
++			});
++		}
+ 		try {
+ 			if (!resolvedSqlitePath.exists) {
+ 				throw new ToolError(`SQLite database '${displayPath}' not found`);
+@@ -876,7 +899,7 @@
+ 					}`,
+ 					resolvedArchivePath.absolutePath,
+ 				);
+-				const archiveResult = await this.#writeArchiveEntry(cleanContent, cleanBytes, content, resolvedArchivePath);
++				const archiveResult = await this.#writeArchiveEntry(cleanContent, cleanBytes, content, resolvedArchivePath, _toolCallId);
+ 				if (stripped) {
+ 					const firstText = archiveResult.content.find(
+ 						(block): block is { type: "text"; text: string } =>
+@@ -894,7 +917,7 @@
+ 				await enforcePlanModeWrite(this.session, resolvedSqlitePath.sqlitePath, { op: "update", signal });
+ 
+ 				emitWriteProgress(onUpdate, cleanBytes, path, resolvedSqlitePath.absolutePath);
+-				const sqliteResult = await this.#writeSqliteRow(path, cleanContent, resolvedSqlitePath);
++				const sqliteResult = await this.#writeSqliteRow(path, cleanContent, resolvedSqlitePath, _toolCallId);
+ 				if (stripped) {
+ 					const firstText = sqliteResult.content.find(
+ 						(block): block is { type: "text"; text: string } =>
+@@ -935,6 +958,21 @@
+ 				cleanContent,
+ 			);
+ 
++			if (this.session.hasFileWriteGuards?.()) {
++				let previousText: string | undefined;
++				try {
++					previousText = await Bun.file(absolutePath).text();
++				} catch (error) {
++					if (!isEnoent(error)) throw error;
++				}
++				await this.session.guardFileWrite!({
++					path: absolutePath,
++					content: cleanContent,
++					previousText,
++					operation: "write",
++					toolCallId: _toolCallId,
++				});
++			}
+ 			emitWriteProgress(onUpdate, cleanBytes, displayPath, absolutePath);
+ 
+ 			// Try ACP bridge first for editor-visible filesystem paths. Internal
+--- a/src/edit/index.ts
++++ b/src/edit/index.ts
+@@ -489,7 +489,7 @@
+ 		try {
+ 			outcome = await editSession.apply(
+ 				{ lspBatchId: batch?.id, lspFlush: batch?.flush ?? false },
+-				(_error, request) => this.#write(request, signal),
++				(_error, request) => this.#write(request, toolCallId, signal),
+ 			);
+ 			if (outcome.isError && batch?.flush) {
+ 				await flushLspWritethroughBatch(batch.id, this.session.cwd, signal);
+@@ -534,6 +534,7 @@
+ 					snapshot,
+ 					writethrough: createEditWritethrough(this.session),
+ 					signal,
++					toolCallId,
+ 				});
+ 				if (repaired) getEditStore(this.session).invalidate(snapshot.path);
+ 			} catch (error) {
+@@ -637,7 +638,7 @@
+ 		}
+ 	}
+ 
+-	async #write(request: EditWriteRequest, signal?: AbortSignal): Promise<EditWriteResponse> {
++	async #write(request: EditWriteRequest, toolCallId: string, signal?: AbortSignal): Promise<EditWriteResponse> {
+ 		if (request.op === "delete") {
+ 			await deleteFileWithFallback(request.path, Bun.file(request.path));
+ 			if (this.session.enableLsp ?? true) {
+@@ -662,6 +663,21 @@
+ 		if (request.content === undefined) {
+ 			throw new ToolError(`Native edit ${request.op} request omitted content`, { path: request.path });
+ 		}
++		if (this.session.hasFileWriteGuards?.()) {
++			let previousText: string | undefined;
++			try {
++				previousText = await Bun.file(request.path).text();
++			} catch (error) {
++				if (!isEnoent(error)) throw error;
++			}
++			await this.session.guardFileWrite!({
++				path: request.moveTo ?? request.path,
++				content: request.content,
++				previousText,
++				operation: "edit",
++				toolCallId,
++			});
++		}
+ 
+ 		if (request.op === "move") {
+ 			if (!request.moveTo) {
+--- a/src/edit/auto-repair.ts
++++ b/src/edit/auto-repair.ts
+@@ -341,6 +341,7 @@
+ 	snapshot: AppliedEditSnapshot;
+ 	writethrough: WritethroughCallback;
+ 	signal?: AbortSignal;
++	toolCallId?: string;
+ }): Promise<EditAutoRepairOutcome | undefined> {
+ 	const { session, snapshot, writethrough } = options;
+ 	if (!cfgEditAutoRepairEnabled.get(session.settings)) return undefined;
+@@ -405,6 +406,15 @@
+ 	const repair = await repairParseRegression({ ...snapshot, next: current }, complete);
+ 	if (!repair) return undefined;
+ 
++	if (session.hasFileWriteGuards?.()) {
++		await session.guardFileWrite!({
++			path: snapshot.path,
++			content: repair.content,
++			previousText: current,
++			operation: "edit",
++			toolCallId: options.toolCallId ?? "edit-auto-repair",
++		});
++	}
+ 	await writethrough(snapshot.path, repair.content, options.signal, Bun.file(snapshot.path));
+ 	invalidateFsScanAfterWrite(snapshot.path);
+ 	logger.debug("Edit auto-repair applied", {
+--- a/src/session/agent-session.ts
++++ b/src/session/agent-session.ts
+@@ -425,7 +425,7 @@
+ 	type SessionDumpLiveState,
+ } from "./session-dump-format";
+ import { collectSubSessions, type SubSession } from "./sub-sessions";
+-import type { BranchSummaryEntry, NewSessionOptions } from "./session-entries";
++import type { BranchSummaryEntry, NewSessionOptions, SessionTreeNode } from "./session-entries";
+ import { SessionHandoff, type SessionHandoffHost } from "./session-handoff";
+ import {
+ 	COMPACTION_CHECK_NONE,
+@@ -1146,7 +1146,7 @@
+ 	 * Cleared before every new prompt turn so the next turn evaluates cleanly.
+ 	 */
+ 	#yieldTerminationPending = false;
+-	#synchronouslyTerminatedYieldToolCallIds = new Set<string>();
++	#synchronouslyTerminatedToolCallIds = new Set<string>();
+ 	#providerSessionState = new Map<string, ProviderSessionState>();
+ 	readonly #cacheWarmer: CacheWarmer | undefined;
+ 	#hindsightSessionState: HindsightSessionState | undefined = undefined;
+@@ -3166,11 +3166,13 @@
+ 
+ 	/** Emit an event to all listeners */
+ 	#emit(event: AgentSessionEvent): void {
++		const filtered = this.filterOutputEvent(event);
++		if (filtered === undefined) return;
+ 		// Listener array is copy-on-write (see `subscribe`), so iterating the
+ 		// current array is safe against (un)subscribes made by a listener.
+ 		for (const l of this.#eventListeners) {
+ 			try {
+-				const result = l(event) as unknown;
++				const result = l(filtered) as unknown;
+ 				// Listener may be an async function whose returned Promise we don't await;
+ 				// attach a catch so a rejection does not become an unhandled rejection.
+ 				if (isPromise(result)) {
+@@ -3435,12 +3437,17 @@
+ 		// never revoke a foreground-control grant acquired by a later prompt.
+ 		const computerControlRevocation =
+ 			event.type === "agent_end" ? revokeComputerControlForOwner(this.#eval.getKernelOwnerId()) : undefined;
+-		if (event.type === "tool_execution_end" && this.#isTerminalYieldToolResult(event)) {
+-			const alreadyTerminated = this.#synchronouslyTerminatedYieldToolCallIds.delete(event.toolCallId);
++		if (event.type === "tool_execution_end") {
++			const alreadyTerminated = this.#synchronouslyTerminatedToolCallIds.delete(event.toolCallId);
+ 			if (!alreadyTerminated) {
+-				this.#advisors.prepareForTerminalYieldAdvisorDrain();
+-				this.#markTerminalYieldToolCall(event.toolCallId);
+-				this.agent.abort(TERMINAL_TOOL_RESULT_ABORT_REASON);
++				const terminalYield = this.#isTerminalYieldToolResult(event);
++				if (terminalYield) {
++					this.#advisors.prepareForTerminalYieldAdvisorDrain();
++					this.#markTerminalYieldToolCall(event.toolCallId);
++				}
++				if (terminalYield || this.#isTerminalReplyToolResult(event)) {
++					this.agent.abort(TERMINAL_TOOL_RESULT_ABORT_REASON);
++				}
+ 			}
+ 		}
+ 		if (event.type !== "agent_end") {
+@@ -4916,16 +4923,14 @@
+ 	}
+ 
+ 	#afterToolCall(ctx: AfterToolCallContext): AfterToolCallResult | undefined {
+-		if (
+-			this.#isTerminalYieldToolResult({
+-				toolName: ctx.toolCall.name,
+-				isError: ctx.isError,
+-				result: ctx.result,
+-			})
+-		) {
++		const resultEvent = { toolName: ctx.toolCall.name, isError: ctx.isError, result: ctx.result };
++		const terminalYield = this.#isTerminalYieldToolResult(resultEvent);
++		if (terminalYield) {
+ 			this.#advisors.prepareForTerminalYieldAdvisorDrain();
+ 			this.#markTerminalYieldToolCall(ctx.toolCall.id);
+-			this.#synchronouslyTerminatedYieldToolCallIds.add(ctx.toolCall.id);
++		}
++		if (terminalYield || this.#isTerminalReplyToolResult(resultEvent)) {
++			this.#synchronouslyTerminatedToolCallIds.add(ctx.toolCall.id);
+ 			this.agent.abort(TERMINAL_TOOL_RESULT_ABORT_REASON);
+ 		}
+ 		return this.#ttsr.afterToolCall(ctx);
+@@ -5176,13 +5181,66 @@
+ 		};
+ 	}
+ 
++	/** Display-only projection; never use this event to replace agent state or stored history. */
++	filterOutputEvent(event: AgentSessionEvent): AgentSessionEvent | undefined {
++		return this.#extensionRunner ? this.#extensionRunner.filterOutput(event) : event;
++	}
++
++	/** Detached display transcript when filters are registered; raw history remains unchanged. */
++	getDisplayMessages(messages: AgentMessage[] = this.messages): AgentMessage[] {
++		if (!this.#extensionRunner?.hasOutputFilters()) return messages;
++		const display: AgentMessage[] = [];
++		for (const message of messages) {
++			const filtered = this.filterOutputEvent({ type: "message_end", message });
++			if (filtered?.type === "message_end") display.push(filtered.message);
++		}
++		return display;
++	}
++
++	/** Detached display tree with stable navigation IDs; authoritative history is never rewritten. */
++	getDisplayTree(): SessionTreeNode[] {
++		const tree = this.sessionManager.getTree();
++		if (!this.#extensionRunner?.hasOutputFilters()) return tree;
++		const display = tree;
++		const pending = [...display];
++		while (pending.length > 0) {
++			const node = pending.pop()!;
++			pending.push(...node.children);
++			if (node.entry.type !== "message") {
++				node.entry = structuredClone(node.entry);
++				continue;
++			}
++			const entry = node.entry;
++			const filtered = this.filterOutputEvent({ type: "message_end", message: entry.message });
++			if (filtered?.type === "message_end") {
++				const { message: _message, ...metadata } = entry;
++				node.entry = { ...structuredClone(metadata), message: filtered.message };
++			} else {
++				// Keep the node navigable even when the entire message is suppressed.
++				node.entry = {
++					type: "custom",
++					customType: "filtered_output",
++					id: entry.id,
++					parentId: entry.parentId,
++					timestamp: entry.timestamp,
++				};
++			}
++		}
++		return display;
++	}
++
+ 	/**
+ 	 * Snapshot the latest unpersisted display result for each active tool or
+ 	 * returned background call. Focus rebuilds replay these after reconstructing
+ 	 * persisted transcript state.
+ 	 */
+ 	activeToolExecutionUpdates(): readonly Extract<AgentSessionEvent, { type: "tool_execution_update" }>[] {
+-		return [...this.#activeToolExecutionUpdates.values()];
++		const updates: Extract<AgentSessionEvent, { type: "tool_execution_update" }>[] = [];
++		for (const event of this.#activeToolExecutionUpdates.values()) {
++			const filtered = this.filterOutputEvent(event);
++			if (filtered?.type === "tool_execution_update") updates.push(filtered);
++		}
++		return updates;
+ 	}
+ 
+ 	/**
+@@ -6630,7 +6688,9 @@
+ 	buildTranscriptSessionContext(
+ 		options?: Pick<BuildSessionContextOptions, "collapseCompactedHistory" | "keepDanglingToolCalls">,
+ 	): SessionContext {
+-		return this.#providerBoundary.buildTranscriptSessionContext(options);
++		const context = this.#providerBoundary.buildTranscriptSessionContext(options);
++		if (!this.#extensionRunner?.hasOutputFilters()) return context;
++		return { ...context, messages: this.getDisplayMessages(context.messages) };
+ 	}
+ 
+ 	#obfuscateTextForProvider(text: string | undefined): string | undefined {
+@@ -10480,6 +10540,12 @@
+ 		return this.#maintenance.handoff(customInstructions, options);
+ 	}
+ 
++	#isTerminalReplyToolResult(event: { isError?: boolean; result?: { details?: unknown; isError?: boolean } }): boolean {
++		if (event.isError || event.result?.isError) return false;
++		const details = event.result?.details;
++		return !!details && typeof details === "object" && "terminateTurn" in details && details.terminateTurn === true;
++	}
++
+ 	#isTerminalYieldToolResult(event: { toolName: string; isError?: boolean; result?: { details?: unknown } }): boolean {
+ 		if (event.toolName !== "yield" || event.isError) return false;
+ 		const details = event.result?.details;
+@@ -13232,8 +13298,13 @@
+ 	 * @returns Trimmed text content, or undefined if no assistant message has text
+ 	 */
+ 	getLastAssistantText(): string | undefined {
+-		const lastAssistant = this.#getLastCopyCandidateAssistantMessage();
++		let lastAssistant = this.#getLastCopyCandidateAssistantMessage();
+ 		if (!lastAssistant) return undefined;
++		if (this.#extensionRunner?.hasOutputFilters()) {
++			const filtered = this.filterOutputEvent({ type: "message_end", message: lastAssistant });
++			if (filtered?.type !== "message_end" || filtered.message.role !== "assistant") return undefined;
++			lastAssistant = filtered.message;
++		}
+ 
+ 		let text = "";
+ 		for (const content of lastAssistant.content) {
+--- a/src/modes/controllers/session-focus-controller.ts
++++ b/src/modes/controllers/session-focus-controller.ts
+@@ -182,14 +182,16 @@
+ 				if (generation !== this.#attachGeneration) return;
+ 				if (!assistantStreamSynced) {
+ 					assistantStreamSynced = true;
+-					await this.ctx.eventController.handleEvent({ type: "message_start", message });
++					const start = target.filterOutputEvent({ type: "message_start", message });
++					if (start) await this.ctx.eventController.handleEvent(start);
+ 					if (generation !== this.#attachGeneration) return;
+ 				}
+-				await this.ctx.eventController.handleEvent({
++				const update = target.filterOutputEvent({
+ 					type: "message_update",
+ 					message,
+ 					assistantMessageEvent: { type: "start", partial: message },
+ 				});
++				if (update) await this.ctx.eventController.handleEvent(update);
+ 				if (generation === this.#attachGeneration) this.ctx.eventController.restorePendingToolResults();
+ 			};
+ 			this.ctx.unsubscribe = target.subscribe(async event => {
+--- a/src/modes/rpc/rpc-mode.ts
++++ b/src/modes/rpc/rpc-mode.ts
+@@ -2438,13 +2438,13 @@
+ 			// =================================================================
+ 
+ 			case "get_messages": {
+-				return success(id, "get_messages", { messages: session.messages });
++				return success(id, "get_messages", { messages: session.getDisplayMessages() });
+ 			}
+ 
+ 			case "get_messages_page": {
+ 				if (session.isStreaming || session.isCompacting)
+ 					return error(id, "get_messages_page", RPC_MESSAGES_PAGE_BUSY_ERROR, "session_busy");
+-				const messages = session.messages;
++				const messages = session.getDisplayMessages();
+ 				try {
+ 					return success(
+ 						id,
+--- a/src/modes/print-mode.ts
++++ b/src/modes/print-mode.ts
+@@ -229,8 +229,20 @@
+ 		writeStderrLine(`Warning: ${formatPersistenceNotice(notice)}`);
+ 	});
+ 
++	let lastDisplayToolResult: Extract<AgentMessage, { role: "toolResult" }> | undefined;
+ 	// Always subscribe to enable session persistence via _handleAgentEvent
+ 	session.subscribe(event => {
++		if (
++			mode === "text" &&
++			event.type === "message_end" &&
++			event.message.role === "toolResult" &&
++			typeof event.message.details === "object" &&
++			event.message.details !== null &&
++			"displayAsReply" in event.message.details
++		) {
++			lastDisplayToolResult =
++				event.message.details.displayAsReply === true && !event.message.isError ? event.message : undefined;
++		}
+ 		// In JSON mode, output all events
+ 		if (mode === "json") {
+ 			writeStdoutLine(`${JSON.stringify(printableEvent(event))}\n`);
+@@ -301,6 +313,15 @@
+ 	// can trail synthetic tool results — both would hide the terminal
+ 	// assistant message (and its error) from a last-element read.
+ 	const assistantMsg = session.getLastAssistantMessage();
++	const displayEvent =
++		assistantMsg && session.extensionRunner?.hasOutputFilters()
++			? session.filterOutputEvent({ type: "message_end", message: assistantMsg })
++			: undefined;
++	const displayAssistant = session.extensionRunner?.hasOutputFilters()
++		? displayEvent?.type === "message_end" && displayEvent.message.role === "assistant"
++			? displayEvent.message
++			: undefined
++		: assistantMsg;
+ 	// The terminal stop reason decides the process exit code in every output
+ 	// mode: `--mode json` used to report success for the same turn-fatal error
+ 	// text mode exits 1 on (issue #11498). Silent aborts (plan-mode compaction
+@@ -312,22 +333,27 @@
+ 		(assistantMsg.stopReason === "error" || assistantMsg.stopReason === "aborted") &&
+ 		!isSilentAbort(assistantMsg) &&
+ 		!signalTeardownActive();
++	const terminalDisplayReply =
++		typeof lastDisplayToolResult?.details === "object" &&
++		lastDisplayToolResult.details !== null &&
++		"terminateTurn" in lastDisplayToolResult.details &&
++		lastDisplayToolResult.details.terminateTurn === true;
+ 
+ 	// In text mode, output the final response. A terminal failure prints only
+ 	// the error line below; JSON mode already emitted the assistant message and
+ 	// stop reason through the event subscription.
+ 	if (mode === "text" && !terminalFailure && !strictMCPFailure) {
+-		if (assistantMsg) {
++		if (displayAssistant && !terminalDisplayReply) {
+ 			if (
+-				assistantMsg.errorMessage &&
+-				assistantMsg.stopReason !== "error" &&
+-				assistantMsg.stopReason !== "aborted"
++				displayAssistant.errorMessage &&
++				displayAssistant.stopReason !== "error" &&
++				displayAssistant.stopReason !== "aborted"
+ 			) {
+-				process.stderr.write(`${sanitizeText(assistantMsg.errorMessage)}\n`);
++				process.stderr.write(`${sanitizeText(displayAssistant.errorMessage)}\n`);
+ 			}
+ 
+ 			// Output text content
+-			for (const content of assistantMsg.content) {
++			for (const content of displayAssistant.content) {
+ 				if (content.type === "text") {
+ 					writeStdoutLine(`${sanitizeText(content.text)}\n`);
+ 				} else if (printThoughts && content.type === "thinking" && content.thinking.trim().length > 0) {
+@@ -335,6 +361,22 @@
+ 				}
+ 			}
+ 		}
++		// An explicit terminal reply owns delivery, even without output filters.
++		// Never fall back to raw history or to an older result after a rejected one.
++		if (
++			(terminalDisplayReply ||
++				!displayAssistant?.content.some(
++					content =>
++						(content.type === "text" && content.text.trim().length > 0) ||
++						(printThoughts && content.type === "thinking" && content.thinking.trim().length > 0),
++				)) &&
++			lastDisplayToolResult &&
++			!lastDisplayToolResult.isError
++		) {
++			for (const content of lastDisplayToolResult.content) {
++				if (content.type === "text" && content.text.trim()) writeStdoutLine(`${sanitizeText(content.text)}\n`);
++			}
++		}
+ 		session.setTextOutputCommitted(true);
+ 	}
+ 
+@@ -375,8 +417,8 @@
+ 
+ 	// Text mode reports the terminal failure on stderr exactly as before: same
+ 	// line, same ordering after dispose, without terminating the process here.
+-	if (mode === "text" && terminalFailure && assistantMsg) {
+-		const errorLine = sanitizeText(assistantMsg.errorMessage || `Request ${assistantMsg.stopReason}`);
++	if (mode === "text" && terminalFailure && displayAssistant) {
++		const errorLine = sanitizeText(displayAssistant.errorMessage || `Request ${displayAssistant.stopReason}`);
+ 		if (!process.stderr.write(`${errorLine}\n`)) {
+ 			const { promise, resolve } = Promise.withResolvers<void>();
+ 			process.stderr.once("drain", resolve);
+--- a/dist/types/extensibility/extensions/types.d.ts
++++ b/dist/types/extensibility/extensions/types.d.ts
+@@ -36,6 +36,7 @@
+ import type { Theme } from "@oh-my-pi/pi-tui/theme";
+ import type { NativeToolView } from "@oh-my-pi/pi-tui/tools/renderer";
+ import type { AsyncJobSnapshot, SendUserMessageOptions } from "../../session/agent-session.js";
++import type { AgentSessionEvent } from "../../session/agent-session-events.js";
+ import type { EphemeralTurnOptions, EphemeralTurnResult } from "../../session/agent-session-types.js";
+ import type { CompactMode } from "../../session/compact-modes.js";
+ import type { CustomMessagePayload } from "../../session/messages.js";
+@@ -1127,6 +1128,17 @@
+ }
+ /** Handler function type for events */
+ export type ExtensionHandler<E, R = undefined> = (event: E, ctx: ExtensionContext) => Promise<R | void> | R | void;
++export interface FileWriteGuardRequest {
++    readonly path: string;
++    readonly content: string;
++    readonly previousText?: string;
++    readonly operation: "write" | "edit";
++    readonly toolCallId: string;
++}
++/** Throwing rejects the mutation before its writer runs. */
++export type FileWriteGuardHandler = (request: FileWriteGuardRequest, ctx: ExtensionContext) => void | Promise<void>;
++/** Synchronous detached display-only projection; undefined suppresses output. */
++export type OutputFilterHandler = (event: AgentSessionEvent, ctx: ExtensionContext) => AgentSessionEvent | undefined;
+ /** Service tiers accepted by each provider family. */
+ export type ExtensionServiceTier<Family extends ServiceTierFamily> = Family extends "anthropic" ? "priority" : Family extends "google" ? "flex" | "priority" : ServiceTier;
+ /**
+@@ -1145,6 +1157,8 @@
+     zod: typeof zod;
+     /** Injected pi-coding-agent exports for accessing SDK utilities */
+     pi: typeof PiCodingAgent;
++    registerFileWriteGuard(handler: FileWriteGuardHandler): void;
++    registerOutputFilter(handler: OutputFilterHandler): void;
+     on(event: "resources_discover", handler: ExtensionHandler<ResourcesDiscoverEvent, ResourcesDiscoverResult>): void;
+     on(event: "session_start", handler: ExtensionHandler<SessionStartEvent>): void;
+     on(event: "session_before_switch", handler: ExtensionHandler<SessionBeforeSwitchEvent, SessionBeforeSwitchResult>): void;
+@@ -1608,6 +1622,8 @@
+     tools: Map<string, RegisteredTool<any, any>>;
+     toolRegistrationListeners?: Set<ToolRegistrationListener>;
+     assistantThinkingRenderers: AssistantThinkingRenderer[];
++    fileWriteGuardHandlers?: FileWriteGuardHandler[];
++    outputFilterHandlers?: OutputFilterHandler[];
+     fileWriteFallbackHandlers: FileWriteFallbackHandler[];
+     fileDeleteFallbackHandlers: FileDeleteFallbackHandler[];
+     messageRenderers: Map<string, MessageRenderer>;
+@@ -1644,3 +1660,8 @@
+     error: string;
+     stack?: string;
+ }
++
++export interface ExtensionReplyDetails {
++    displayAsReply?: boolean;
++    terminateTurn?: boolean;
++}
+--- a/dist/types/extensibility/extensions/runner.d.ts
++++ b/dist/types/extensibility/extensions/runner.d.ts
+@@ -7,6 +7,8 @@
+ import type { MemoryRuntimeContext } from "../../memory-backend/index.js";
+ import type { AsyncJobSnapshot } from "../../session/agent-session.js";
+ import type { SessionManager } from "../../session/session-manager.js";
++import type { AgentSessionEvent } from "../../session/agent-session-events.js";
++import type { FileWriteGuardRequest } from "./types.js";
+ import type { BranchHandler, NavigateTreeHandler, NewSessionHandler } from "../session-handler-types.js";
+ import type { ComposerShapeDefinition } from "@oh-my-pi/pi-tui/overlays/composer-shape-registry";
+ import type { AfterProviderResponseEvent, AssistantThinkingRenderer, BeforeAgentStartEvent, BeforeAgentStartEventResult, BeforeProviderRequestEvent, BeforeProviderRequestEventResult, BeforeSubagentSpawnEvent, BeforeSubagentSpawnEventResult, ContextEvent, Extension, ExtensionActions, ExtensionAgentIdentity, ExtensionAnnotationsAPI, ExtensionAnnotationsFactory, ExtensionCommandContext, ExtensionCommandContextActions, ExtensionContext, ExtensionContextActions, ExtensionError, ExtensionEvent, ExtensionFlag, ExtensionMode, ExtensionRuntime, ExtensionShortcut, ExtensionUIContext, InputEvent, InputEventResult, CacheWarmingAction, CacheWarmingDecisionEvent, McpNotificationEvent, MessageRenderer, RegisteredCommand, RegisteredTool, ResourcesDiscoverEvent, SessionBeforeBranchResult, SessionBeforeCompactResult, SessionBeforeSwitchResult, SessionBeforeTreeResult, SessionCompactingResult, SessionStopEvent, SessionStopEventResult, ToolCallEvent, ToolCallEventResult, ToolResultEvent, ToolResultEventResult, UserBashEvent, UserBashEventResult, UserPythonEvent, UserPythonEventResult } from "./types.js";
+@@ -230,6 +232,10 @@
+         suspended: Extension[];
+         resumed: Extension[];
+     };
++    hasFileWriteGuards(): boolean;
++    guardFileWrite(request: FileWriteGuardRequest): Promise<void>;
++    hasOutputFilters(): boolean;
++    filterOutput(event: AgentSessionEvent): AgentSessionEvent | undefined;
+     /** Get all registered tools from all extensions. */
+     getAllRegisteredTools(): RegisteredTool[];
+     /** Get the effective registered tool for a name using normal last-extension-wins precedence. */
+--- a/dist/types/session/agent-session.d.ts
++++ b/dist/types/session/agent-session.d.ts
+@@ -68,7 +68,7 @@
+ import type { BuildSessionContextOptions, SessionContext } from "./session-context.js";
+ import type { CacheWarmingMode, CacheWarmingStatus } from "./cache-warmer.js";
+ import { type SessionDumpArchive } from "./session-dump-format.js";
+-import type { BranchSummaryEntry, NewSessionOptions } from "./session-entries.js";
++import type { BranchSummaryEntry, NewSessionOptions, SessionTreeNode } from "./session-entries.js";
+ import { type SessionManager } from "./session-manager.js";
+ import type { ShakeMode, ShakeResult } from "./shake-types.js";
+ import { ToolChoiceQueue } from "./tool-choice-queue.js";
+@@ -283,6 +283,10 @@
+      * Multiple listeners can be added. Returns unsubscribe function for this listener.
+      */
+     subscribe(listener: AgentSessionEventListener): () => void;
++    filterOutputEvent(event: AgentSessionEvent): AgentSessionEvent | undefined;
++    getDisplayMessages(messages?: AgentMessage[]): AgentMessage[];
++    /** Detached display tree with stable navigation IDs; authoritative history is never rewritten. */
++    getDisplayTree(): SessionTreeNode[];
+     /**
+      * Snapshot the latest unpersisted display result for each active tool or
+      * returned background call. Focus rebuilds replay these after reconstructing
+--- a/dist/types/tools/index.d.ts
++++ b/dist/types/tools/index.d.ts
+@@ -9,6 +9,7 @@
+ import type { Settings } from "../config/settings.js";
+ import type { ToolPathWithSource } from "../extensibility/custom-tools/index.js";
+ import type { BeforeSubagentSpawnEvent, BeforeSubagentSpawnEventResult, PreparedExtension } from "../extensibility/extensions/types.js";
++import type { FileWriteGuardRequest } from "../extensibility/extensions/types.js";
+ import type { Skill } from "../extensibility/skills.js";
+ import type { GoalModeState, GoalRuntime } from "../goals/index.js";
+ import type { HindsightSessionState } from "../hindsight/state.js";
+@@ -138,6 +139,8 @@
+     settingsApproval?: boolean;
+     /** Whether this session has begun disposal. */
+     isDisposed?: () => boolean;
++    hasFileWriteGuards?(): boolean;
++    guardFileWrite?(request: FileWriteGuardRequest): Promise<void>;
+     /**
+      * Suppress the spawn specialization/coordination advisory appended to `task`
+      * results. Set by internal/programmatic callers (e.g. the commit agent's
+--- a/src/tools/conflict-uri.ts
++++ b/src/tools/conflict-uri.ts
+@@ -102,6 +102,7 @@
+ 	session: ToolSession,
+ 	raw: string,
+ 	content: string,
++	toolCallId: string,
+ 	signal: AbortSignal | undefined,
+ ): Promise<InternalWriteResult> {
+ 	const target = parseTarget(raw);
+@@ -111,8 +112,8 @@
+ 		);
+ 	}
+ 	const { text: cleanContent, stripped } = stripWriteContent(session, content);
+-	if (target.id === "*") return resolveAllConflicts(session, cleanContent, stripped, signal, content);
+-	return resolveConflict(session, requireEntry(session, target.id), cleanContent, stripped, signal);
++	if (target.id === "*") return resolveAllConflicts(session, cleanContent, stripped, signal, content, toolCallId);
++	return resolveConflict(session, requireEntry(session, target.id), cleanContent, stripped, signal, toolCallId);
+ }
+ 
+ /**
+@@ -133,6 +134,7 @@
+ 	replacementContent: string,
+ 	stripped: boolean,
+ 	signal: AbortSignal | undefined,
++	toolCallId: string,
+ ): Promise<InternalWriteResult> {
+ 	const absolutePath = entry.absolutePath;
+ 	if (!(await fs.exists(absolutePath))) {
+@@ -143,6 +145,15 @@
+ 	const originalText = await Bun.file(absolutePath).text();
+ 	const splice = spliceConflict(originalText, entry, expanded);
+ 	const newContent = splice.text;
++	if (session.hasFileWriteGuards?.()) {
++		await session.guardFileWrite!({
++			path: absolutePath,
++			content: newContent,
++			previousText: originalText,
++			operation: "edit",
++			toolCallId,
++		});
++	}
+ 
+ 	await writethroughNoop(absolutePath, newContent, signal);
+ 	invalidateFsScanAfterWrite(absolutePath);
+@@ -300,6 +311,7 @@
+ 	stripped: boolean,
+ 	signal: AbortSignal | undefined,
+ 	rawContent: string,
++	toolCallId: string,
+ ): Promise<InternalWriteResult> {
+ 	const history = getConflictHistory(session);
+ 	const allEntries = history.entries();
+@@ -367,6 +379,7 @@
+ 			});
+ 			continue;
+ 		}
++		const originalText = text;
+ 		for (const entry of fileEntries) {
+ 			try {
+ 				const expanded = expandContentTokens(contentFor(entry), entry);
+@@ -395,6 +408,25 @@
+ 			continue;
+ 		}
+ 
++		if (session.hasFileWriteGuards?.()) {
++			try {
++				await session.guardFileWrite!({
++					path: absolutePath,
++					content: text,
++					previousText: originalText,
++					operation: "edit",
++					toolCallId,
++				});
++			} catch (error) {
++				failedFiles.push({
++					displayPath: sample.displayPath,
++					count: fileEntries.length,
++					error: error instanceof Error ? error.message : String(error),
++				});
++				continue;
++			}
++		}
++
+ 		await writethroughNoop(absolutePath, text, signal);
+ 		invalidateFsScanAfterWrite(absolutePath);
+ 		session.bumpFileMutationVersion?.(absolutePath);
+--- a/src/internal-urls/conflict-protocol.ts
++++ b/src/internal-urls/conflict-protocol.ts
+@@ -49,6 +49,12 @@
+ 	}
+ 
+ 	async write(url: InternalUrl, content: string, context?: WriteContext): Promise<InternalWriteResult> {
+-		return writeConflictUri(callerSession(context), url.rawHref ?? url.href, content, context?.signal);
++		return writeConflictUri(
++			callerSession(context),
++			url.rawHref ?? url.href,
++			content,
++			context?.toolCall?.id ?? "write-conflict",
++			context?.signal,
++		);
+ 	}
+ }
+--- a/src/internal-urls/ssh-protocol.ts
++++ b/src/internal-urls/ssh-protocol.ts
+@@ -358,8 +358,17 @@
+ 	}
+ 
+ 	async write(url: InternalUrl, content: string, context?: WriteContext): Promise<void> {
+-		const target = await resolveTarget(url, context?.cwd);
+ 		const remotePath = remotePathFromUrl(url);
++		const session = context?.session;
++		if (session?.hasFileWriteGuards?.()) {
++			await session.guardFileWrite!({
++				path: `${url.protocol}//${url.rawHost}${remotePath}`,
++				content,
++				operation: "write",
++				toolCallId: context?.toolCall?.id ?? "write-ssh",
++			});
++		}
++		const target = await resolveTarget(url, context?.cwd);
+ 		await writeRemoteFile(target, remotePath, new TextEncoder().encode(content), { signal: context?.signal });
+ 	}
+ }
+--- a/dist/types/tools/conflict-uri.d.ts
++++ b/dist/types/tools/conflict-uri.d.ts
+@@ -24,4 +24,4 @@
+  * directives are parsed before stripping, which would eat their `<id>:` heads).
+  * Scoped URIs (`/ours`, `/theirs`, `/base`) are read-only.
+  */
+-export declare function writeConflictUri(session: ToolSession, raw: string, content: string, signal: AbortSignal | undefined): Promise<InternalWriteResult>;
++export declare function writeConflictUri(session: ToolSession, raw: string, content: string, toolCallId: string, signal: AbortSignal | undefined): Promise<InternalWriteResult>;
+--- a/src/modes/controllers/selector-controller.ts
++++ b/src/modes/controllers/selector-controller.ts
+@@ -1322,7 +1322,7 @@
+ 	#siblingBranchPaths(entryId: string): BranchVariantPath[] {
+ 		const entry = this.ctx.sessionManager.getEntry(entryId);
+ 		if (!entry) return [];
+-		const forest = this.ctx.sessionManager.getTree();
++		const forest = this.ctx.session.getDisplayTree();
+ 		const byId = new Map<string, SessionTreeNode>();
+ 		const stack = [...forest];
+ 		while (stack.length > 0) {
+@@ -1455,7 +1455,7 @@
+ 	}
+ 
+ 	showTreeSelector(): void {
+-		const tree = this.ctx.sessionManager.getTree();
++		const tree = this.ctx.session.getDisplayTree();
+ 		const realLeafId = this.ctx.sessionManager.getLeafId();
+ 
+ 		if (tree.length === 0) {

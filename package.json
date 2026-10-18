@@ -1,0 +1,32 @@
+{
+  "name": "omp-ste",
+  "version": "0.1.0",
+  "description": "Simplified Technical English enforcement for omp using the agent-simple-english engine",
+  "type": "module",
+  "license": "MIT",
+  "files": ["src", "scripts/prepare-host.ts", "host-patches", "README.md", "LICENSE"],
+  "omp": { "extensions": ["./src/index.ts"] },
+  "engines": { "bun": ">=1.3.14" },
+  "scripts": {
+    "check": "tsc --noEmit",
+    "test": "bun test",
+    "host:patch": "bun scripts/prepare-host.ts",
+    "omp": "bun run host:patch && bun node_modules/@oh-my-pi/pi-coding-agent/src/cli.ts --extension ."
+  },
+  "dependencies": {
+    "agent-simple-english": "0.8.0",
+    "effect": "4.0.1"
+  },
+  "peerDependencies": {
+    "@oh-my-pi/pi-coding-agent": ">=18.11.0 <19"
+  },
+  "peerDependenciesMeta": {
+    "@oh-my-pi/pi-coding-agent": { "optional": true }
+  },
+  "devDependencies": {
+    "@oh-my-pi/pi-coding-agent": "^18.11.0",
+    "@oh-my-pi/pi-ai": "^18.11.0",
+    "@types/bun": "^1.4.3",
+    "typescript": "^7.0.2"
+  }
+}
