@@ -110,7 +110,7 @@ function warnings(state: SessionState, ctx: ExtensionContext, id: string, path: 
 
 export default function simpleEnglishExtension(pi: ExtensionAPI): void {
   if (typeof pi.registerFileWriteGuard !== "function" || typeof pi.registerOutputFilter !== "function") {
-    throw new Error("omp-ste requires the companion omp host patch with registerFileWriteGuard and registerOutputFilter. Stock omp 18.11/18.12 cannot safely enforce writing rules or strict reply privacy.");
+    throw new Error("omp-ste needs its compatible runtime. In the omp-ste checkout, run bun install --frozen-lockfile and bun link, then launch omp-ste instead of stock omp.");
   }
 
   // SessionManager can switch its underlying session; key by session ID, not object identity.
