@@ -51,7 +51,7 @@ export default function steExtension(pi: ExtensionAPI): void {
 
   function report(ctx: ExtensionContext, violations: Violation[]): void {
     const { hard, soft } = summarise(violations);
-    ctx.ui.setStatus("ste", hard + soft === 0 ? "STE: clean" : `STE: ${hard} hard / ${soft} soft`);
+    ctx.ui.setStatus("ste", hard + soft === 0 ? "✓ STE" : `${hard ? "×" : "△"} STE: ${hard} hard / ${soft} soft`);
   }
 
   function flush(state: State, mode: "steer" | "nextTurn"): void {
@@ -101,7 +101,7 @@ export default function steExtension(pi: ExtensionAPI): void {
         ctx.ui.notify("Usage: /ste [on|off|status|strict|strict on|strict off]", "warning");
         return;
       }
-      ctx.ui.setStatus("ste", state.enabled ? `STE: ${state.strict ? "strict" : "enabled"}` : undefined);
+      ctx.ui.setStatus("ste", state.enabled ? (state.strict ? "◆ STE strict" : "○ STE") : undefined);
       ctx.ui.notify(!state.enabled ? "STE disabled" : state.strict
         ? "STE strict: send every reply through say. Direct replies are not blocked by omp."
         : "STE enabled", "info");
@@ -141,7 +141,7 @@ export default function steExtension(pi: ExtensionAPI): void {
 
   function start(ctx: ExtensionContext): void {
     const state = stateFor(ctx);
-    ctx.ui.setStatus("ste", state.enabled ? `STE: ${state.strict ? "strict" : "enabled"}` : undefined);
+    ctx.ui.setStatus("ste", state.enabled ? (state.strict ? "◆ STE strict" : "○ STE") : undefined);
   }
   pi.on("session_start", (_event, ctx) => { start(ctx); });
   pi.on("session_switch", (_event, ctx) => { start(ctx); });

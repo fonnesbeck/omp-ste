@@ -88,6 +88,44 @@ If the agent continues working, it can receive feedback during the same task.
 Otherwise, it receives the feedback with your next prompt. Feedback during a
 task is limited to three notices to avoid repeated correction requests.
 
+## Status bar
+
+The status shows the result of the most recent automatic check, not the whole session.
+
+| Display | Meaning |
+|---|---|
+| `○ STE` | Checks enabled, no result yet |
+| `◆ STE strict` | Strict reply mode selected |
+| `✓ STE` | The last check found no violations |
+| `× STE: 2 hard / 1 soft` | The last check found hard violations |
+| `△ STE: 0 hard / 1 soft` | The last check found warnings only |
+
+`/ste off` removes the status. A check result replaces the mode label without changing the mode.
+Use `/ste status` to see the current mode.
+
+OMP normally shows plugin status text below the prompt.
+To put it inside the native status bar, use a custom layout with the `status` segment.
+Set `statusLine.showHookStatus` to `false` to remove the separate row.
+
+This example keeps the default OMP 18.12 layout and adds status text on the right.
+Merge it into your OMP configuration, or add `status` to your existing custom segment list.
+
+```yaml
+statusLine:
+  preset: custom
+  leftSegments: [pi, vim, model, mode, collab, stream, path, git, pr, context_pct, cost]
+  rightSegments: [session_name, status]
+  separator: powerline-thin
+  segmentOptions:
+    model: {showThinkingLevel: true}
+    path: {abbreviate: true, maxLength: 40, stripWorkPrefix: true}
+    git: {showBranch: true, showStaged: true, showUnstaged: true, showUntracked: true}
+  showHookStatus: false
+```
+
+The native segment uses your OMP theme and includes status text from all plugins.
+The plugin does not change your OMP settings or replace its status bar.
+
 ## Session commands
 
 Enter these commands in omp:
