@@ -29,6 +29,34 @@ The extension refuses to load without the required APIs. omp can continue after
 an extension-load error, so a stock `omp -e .` is **not** an enforced session.
 Use the launcher below, or a host with the companion changes.
 
+## Install for omp
+
+On an omp host with the required companion hooks, install directly from GitHub:
+
+```bash
+omp plugin install github:fonnesbeck/omp-ste
+omp plugin list
+omp
+```
+
+The install is user-wide by default. No manual clone, Pixi environment, npm
+publication, or `plugin link` is needed to install the extension. The package's
+`omp.extensions` manifest lets omp discover and load it in new sessions.
+
+In the new session, run `/ste status` to check that the engine loaded.
+Checks start enabled/non-strict; `/ste strict` also gates replies. Your existing
+global writing-rule configuration still applies: only `hard` rules block
+changes, and strict mode does not promote `soft` or `off` rules.
+
+**Host prerequisite:** this command installs the extension, not the companion
+host patch. An unmodified standalone omp binary lacks the required hooks;
+installing a plugin cannot add them to that executable. Use an already-patched
+global omp, or the source-host setup below. After an omp upgrade, reapply the
+matching host patch before starting enforced sessions.
+
+The package is not published to npm, so use the `github:` source above rather
+than `omp plugin install omp-ste`.
+
 ### Run from this checkout
 
 Install [Pixi](https://pixi.sh), then run:
@@ -51,7 +79,7 @@ The environment supplies Bun and GNU patch. Without Pixi, use Bun 1.3.14 or newe
 and GNU patch:
 
 ```bash
-bun install
+bun install --backend=copyfile
 bun run omp
 ```
 
