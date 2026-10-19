@@ -230,37 +230,7 @@ an error rather than silently disabling checks.
 - Passing these checks does not certify ASD-STE100 compliance. The plugin does
   not include the full official dictionary.
 
-## Switching from the old implementation
-
-Start `omp`, not the old `omp-ste` launcher. This version needs no host patches.
-
-Replace `.simple-english.json` with `.ste.json`. Use the rule names from
-agent-ste, such as `style/contraction`. The old configuration format is no
-longer read.
-
-## Development
-
-These commands install development dependencies and run the checks:
-
-```sh
-pixi run install
-pixi run check
-pixi run test
-```
-
-The omp SDK is needed only for development. Tests use real omp tools and a
-scripted model, without credentials for an AI provider.
-
-- `src/index.ts` registers the plugin's tools, commands, and event handlers.
-- `src/subjects.ts` selects the text to check from omp tool calls.
-- `src/engine.ts` provides access to the bundled agent-ste 0.5.2 checker.
-
-The bundled checker includes one bug fix: it correctly reads line comments
-after a line of code. The original scanner could skip those comments.
-A regression test covers this case. No omp code is changed.
-
-Source versions, checksums, licenses, and local changes are recorded in
-[`vendor/agent-ste/package.json`](vendor/agent-ste/package.json).
+## License
 
 MIT. The original agent-ste checker is by Cameron Austgen. See [LICENSE](LICENSE)
 and the licenses under `vendor/agent-ste` for bundled components.
