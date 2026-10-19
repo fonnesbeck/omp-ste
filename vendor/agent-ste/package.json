@@ -1,0 +1,50 @@
+{
+  "name": "agent-ste",
+  "version": "0.5.2",
+  "private": true,
+  "type": "module",
+  "license": "MIT",
+  "author": "Cameron Austgen",
+  "repository": "https://github.com/ctotheameron/agent-ste",
+  "vendored": {
+    "source": "https://registry.npmjs.org/agent-ste/-/agent-ste-0.5.2.tgz",
+    "integrity": "sha512-2SN3SCeShRYXpqXLrqfjKy5pMt3Uqr3X19Z9vQMVjUpQbwj94iUIOtrAg1mJizFBmq3XxjhghU8hxB0DeFKdLw==",
+    "gitHead": "7672eb68144f2cb188ae0df9e4a9eab8f9a6ce3e",
+    "files": ["src/host/config.mjs", "src/host/lint.mjs", "src/host/select.mjs", "dist/**/*.mjs", "LICENSE"],
+    "modifications": "dist/ste/ste/select.mjs: read_line now enters template state only when a backtick flips it; upstream incorrectly skipped all later comments after a plain first line. Other JavaScript modules and LICENSE are unchanged. Unused Erlang outputs are omitted. TypeScript declarations, dependency licenses and this provenance metadata are local additions.",
+    "dependencyVersionsSource": "https://github.com/ctotheameron/agent-ste/blob/7672eb68144f2cb188ae0df9e4a9eab8f9a6ce3e/manifest.toml",
+    "compilerVersionSource": "https://github.com/ctotheameron/agent-ste/blob/7672eb68144f2cb188ae0df9e4a9eab8f9a6ce3e/.tool-versions",
+    "bundledDependencies": [
+      {
+        "name": "gleam",
+        "version": "1.18.0",
+        "description": "Generated JavaScript prelude/runtime",
+        "source": "https://github.com/gleam-lang/gleam/tree/v1.18.0",
+        "license": "Apache-2.0",
+        "licenseFile": "licenses/gleam/LICENCE"
+      },
+      {
+        "name": "gleam_stdlib",
+        "version": "1.0.3",
+        "source": "https://repo.hex.pm/tarballs/gleam_stdlib-1.0.3.tar",
+        "license": "Apache-2.0",
+        "licenseFile": "licenses/gleam_stdlib/LICENCE"
+      },
+      {
+        "name": "gleam_json",
+        "version": "3.1.0",
+        "source": "https://repo.hex.pm/tarballs/gleam_json-3.1.0.tar",
+        "license": "Apache-2.0",
+        "licenseFile": "licenses/gleam_json/LICENCE"
+      },
+      {
+        "name": "gleam_regexp",
+        "version": "1.1.1",
+        "source": "https://repo.hex.pm/tarballs/gleam_regexp-1.1.1.tar",
+        "license": "Apache-2.0",
+        "licenseFile": "licenses/gleam/LICENCE",
+        "licenseSource": "The Hex archive metadata.config declares Apache-2.0; the archive includes no license text."
+      }
+    ]
+  }
+}

@@ -1,79 +1,155 @@
 # omp-ste
 
-Writing-quality checks for [omp](https://omp.sh), powered by
-[agent-simple-english](https://github.com/jyooi/agent-simple-english).
-Checks documentation, code comments, commit messages, and assistant replies.
+A self-contained port of [agent-ste](https://pi.dev/packages/agent-ste) for
+[omp](https://omp.sh). It checks documentation, code comments, shell message
+arguments, and assistant replies against Simplified Technical English rules.
+
+This is an **omp plugin**, not an agent launcher. It uses stock extension APIs.
+There is no bundled omp runtime, host patch, service, network call, or runtime
+package dependency. The compiled agent-ste 0.5.2 engine ships with the plugin.
 
 ## Install
 
-Requires [Git](https://git-scm.com) and [Bun 1.3.14 or newer](https://bun.sh).
-Use the same commands on Linux, macOS, and Windows:
+With stock omp installed:
 
 ```sh
 git clone https://github.com/fonnesbeck/omp-ste.git
-cd omp-ste
-bun install --frozen-lockfile
-bun link
+omp plugin install ./omp-ste
 ```
 
-Bun installs the compatible omp runtime and applies its dependency patch
-normally. There is no custom installer, manual patch step, or change to your
-existing omp executable. Keep the checkout in place.
+The local install links the checkout. Keep it in place. No `bun install`, build,
+or `bun link` is needed to use the plugin. Start `omp` as usual, then run
+`/ste status`. New sessions start with checks enabled and strict mode off.
 
-**Use this installation method rather than `omp plugin install` on stock omp.**
-Stock omp lacks the hooks this package needs.
-
-## Use
-
-From your project directory, start:
+For one session without installation:
 
 ```sh
-omp-ste
+omp --extension /absolute/path/to/omp-ste
 ```
 
-Or run `bun run omp` from the checkout. Existing omp settings and model
-credentials remain in use. Run `/ste status` in the session to confirm that
-checks loaded. New sessions start enabled, with non-strict reply feedback.
+Verified with the stock 18.12.1 SDK and the unmodified omp 18.12.2 executable.
+
+## What runs
+
+1. The active rule list enters the model's system prompt.
+2. A hard fault blocks a supported tool call **before execution** and gives the
+   model a line, column, rule ID, and correction. Soft faults warn without
+   blocking and appear in the tool result.
+3. Assistant replies stay unchanged. Faults feed back into the model's context:
+   during a tool-using run, or at the next user prompt for a final reply.
+   Same-run feedback is capped at three notes to avoid a correction loop.
+
+| Surface | Checked text |
+|---|---|
+| `write` | Prose files and source comments, selected by file extension |
+| `edit` | Newly supplied text in hashline, replace, patch, apply-patch, and sloppy modes |
+| `bash` | Prose in `-m` and `--message` arguments, including commit messages |
+| `say` | The proposed reply |
+| Assistant messages | Text blocks, not thinking or tool arguments |
+
+Markdown code fences and inline code are excluded. Source identifiers and string
+values are not prose. Unsupported file types are left alone. The linter reports
+faults; it never rewrites text.
+
+Two tools are available to the model:
+
+- `ste_lint`: check a draft and return structured violations. Available even
+  when automatic enforcement is off.
+- `say`: return the supplied reply unchanged if it passes the enabled checks.
+
+## Session controls
 
 | Command | Effect |
 |---|---|
-| `/ste` | Toggle checks |
+| `/ste` | Toggle automatic checks |
 | `/ste on` | Enable checks |
 | `/ste off` | Disable checks and leave strict mode |
-| `/ste status` | Show mode and rule status |
-| `/ste strict` | Also gate replies before displaying them |
-| `/ste strict off` | Return to normal reply feedback |
+| `/ste status` | Show the mode, severity overrides, and any config error |
+| `/ste strict` or `/ste strict on` | Instruct the model to send every reply through `say` |
+| `/ste strict off` | Return to ordinary reply feedback |
 
-Modes apply only to the current session. Hard violations block supported file
-changes and detected commit messages; soft violations produce warnings. Strict
-mode does not turn soft or disabled rules into hard rules.
+Strict mode follows the upstream pi design: the tool call is the enforcement
+point. A hard fault blocks `say`; a soft fault does not. **Direct assistant text
+is not blocked or retracted.** The model must follow the instruction to use
+`say`. Tool arguments can also appear in logs or client displays. Strict mode is
+not an output filter or a confidentiality boundary.
 
 ## Configuration
 
-Global settings: `~/.config/simple-english/config.json`, or
-`$XDG_CONFIG_HOME/simple-english/config.json` when XDG is an absolute path.
-Project settings: `.simple-english.json` in the session's working directory.
-Trusted project settings override global settings.
+Use the upstream `.ste.json` format:
 
 ```json
 {
-  "maxSentenceWords": 30,
   "rules": {
-    "verb-passive": "hard",
-    "marketing": "soft"
+    "verb/passive": "off",
+    "style/marketing": "hard",
+    "length/paragraph": "soft"
   }
 }
 ```
 
-Rules accept `hard`, `soft`, or `off`. Restart the session after changing settings.
-See the [rule reference](https://github.com/jyooi/agent-simple-english#readme)
-for available rules and custom dictionaries.
+Global defaults come from `STE_CONFIG`, if set. Otherwise they come from
+`$XDG_CONFIG_HOME/ste/config.json`, or `~/.config/ste/config.json` when XDG is
+absent or relative. The nearest `.ste.json`, searched upward from the session's
+working directory, overrides each rule it names and keeps the other defaults.
 
-## Limits
+Rules accept `hard`, `soft`, or `off`. An off rule also leaves the model's rule
+list. An all-soft configuration blocks no writes but still reports reply faults.
+Unknown keys, rule IDs, or severities are errors. An explicitly named missing
+`STE_CONFIG` file is also an error. Like the upstream pi extension, this plugin
+warns about a config error and uses built-in severities. It does not silently
+accept the invalid settings. Start a new session after changing configuration.
 
-- Shell commands and external programs can bypass the file gate.
-- Strict mode controls displayed replies; it does not erase raw session history.
-- The bundled dictionary is a sample, not the full official ASD-STE100 dictionary.
-  This package does not certify compliance.
+Rule IDs: `dictionary/not-approved-word`, `length/sentence`,
+`length/paragraph`, `verb/progressive`, `verb/perfect`, `verb/passive`,
+`style/contraction`, `style/semicolon`, `style/phrasal-verb`, `style/hedge`,
+`style/marketing`, and `suppress/invalid-directive`. See the
+[upstream rule reference](https://github.com/ctotheameron/agent-ste#what-it-checks)
+for defaults and examples.
 
-MIT. Attribution notices are in [LICENSE](LICENSE).
+Suppress a rule on the next line with the file's comment syntax:
+
+```markdown
+<!-- ste-disable-next-line style/marketing -->
+The robust estimator fits this sample.
+```
+
+A missing or unknown rule ID reports `suppress/invalid-directive`.
+
+## Scope and migration
+
+- Shell redirection, external programs, and other mutation tools can bypass the
+  file checks. This is a writing aid, not a filesystem security policy.
+- Edit checks read supplied additions, not reconstructed files. They do not
+  recheck old prose or recover syntax from surrounding, unchanged code. Cut/paste
+  registers and non-file destinations without a recognizable extension are not
+  a full-file enforcement boundary.
+- Comment extraction is heuristic. These checks do not certify ASD-STE100
+  compliance or include the full official dictionary.
+- This replaces the earlier `omp-ste` launcher and host-patch design. Launch
+  `omp`, not `omp-ste`. Replace `.simple-english.json` with `.ste.json` and use
+  the upstream slash-separated rule IDs. Old engine settings are not read.
+
+## Development and upstream source
+
+```sh
+pixi run install
+pixi run check
+pixi run test
+```
+
+The host SDK is a development dependency only. Tests exercise the real stock
+host tool pipeline with a local scripted model, without provider credentials.
+
+`src/index.ts` owns the extension lifecycle. `src/subjects.ts` maps omp tool
+inputs to lint subjects. `src/engine.ts` exposes the bundled upstream engine.
+The release URL, archive integrity, licenses, and local changes are recorded in
+[`vendor/agent-ste/package.json`](vendor/agent-ste/package.json).
+
+The bundled source has one correction to upstream 0.5.2: the comment scanner
+enters template-literal state only at a backtick transition. The upstream code
+otherwise skips later line comments after an ordinary first line. A regression
+test covers comments after code. No omp code is modified.
+
+MIT. The upstream engine is by Cameron Austgen. See [LICENSE](LICENSE) and the
+licenses under `vendor/agent-ste` for bundled components.
