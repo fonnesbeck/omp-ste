@@ -1,3 +1,5 @@
+import { homedir } from "node:os";
+import { extname, resolve } from "node:path";
 import type { ExtensionAPI, ExtensionContext } from "@oh-my-pi/pi-coding-agent";
 import {
   check, format, lint, loadConfig, newEngine, promptText, replyFaults,
@@ -13,13 +15,15 @@ const STRICT_NOTE = [
   "A hard violation blocks the call. Read the reason, rewrite the text, then call the tool again.",
 ].join("\n");
 const NOTE_CAP = 3;
-const COMMANDS = ["on", "off", "status", "strict", "strict on", "strict off"];
+const COMMANDS = ["on", "off", "status", "strict", "strict on", "strict off", "mode operational", "mode authored"];
 
 interface State {
   engine: Engine;
   fault?: string;
   enabled: boolean;
   strict: boolean;
+  mode: "operational" | "authored";
+  authoredPath?: string;
   pending: Violation[];
   notes: number;
   warnings: Map<string, string>;
@@ -42,7 +46,7 @@ export default function steExtension(pi: ExtensionAPI): void {
         fault = error instanceof Error ? error.message : String(error);
         ctx.ui.notify(`STE config: ${fault}. Using built-in severities.`, "warning");
       }
-      state = { engine: newEngine(config), fault, enabled: true, strict: false,
+      state = { engine: newEngine(config), fault, enabled: true, strict: false, mode: "operational",
         pending: [], notes: 0, warnings: new Map() };
       states.set(id, state);
     }
@@ -69,22 +73,37 @@ export default function steExtension(pi: ExtensionAPI): void {
   }
 
   pi.registerCommand("ste", {
-    description: "Toggle STE checks. Use strict to require replies through say, or status to show settings.",
+    description: "Choose the task mode and reply checks. Use status to show settings.",
     getArgumentCompletions: (prefix) => {
       const matches = COMMANDS.filter(value => value.startsWith(prefix)).map(value => ({ value, label: value }));
       return matches.length === 0 ? null : matches;
     },
     handler: async (args, ctx) => {
       const state = stateFor(ctx);
-      const word = args.trim().toLowerCase();
+      const argument = args.trim();
+      const word = argument.toLowerCase();
       if (word === "status") {
         const mode = !state.enabled ? "disabled" : state.strict ? "strict" : "enabled";
         const overrides = Object.entries(state.engine.rules).map(([name, severity]) => `${name}: ${severity}`);
-        ctx.ui.notify([`STE ${mode}`, ...(state.fault ? [`Config error: ${state.fault}. Using built-in severities.`] : []),
+        ctx.ui.notify([`STE ${mode}. Task mode: ${state.mode}.`,
+          ...(state.authoredPath ? [`Authored document: ${state.authoredPath}`] : []),
+          ...(state.fault ? [`Config error: ${state.fault}. Using built-in severities.`] : []),
           ...(overrides.length ? overrides : ["Built-in rule severities."])].join("\n"), "info");
         return;
       }
-      if (word === "strict" || word === "strict on") {
+      const taskMode = /^mode (operational|authored)(?:\s+(.+))?$/i.exec(argument);
+      if (taskMode) {
+        const mode = taskMode[1]!.toLowerCase() as State["mode"];
+        const path = taskMode[2];
+        if (path && (mode !== "authored" || path.includes("://") ||
+          ![".md", ".mdx", ".markdown", ".txt", ".rst"].includes(extname(path).toLowerCase()))) {
+          ctx.ui.notify("Use a local document path with a supported extension.", "warning");
+          return;
+        }
+        state.enabled = true;
+        state.mode = mode;
+        state.authoredPath = path ? resolve(ctx.cwd, path.startsWith("~/") ? resolve(homedir(), path.slice(2)) : path) : undefined;
+      } else if (word === "strict" || word === "strict on") {
         state.enabled = true;
         state.strict = true;
       } else if (word === "strict off") {
@@ -93,18 +112,20 @@ export default function steExtension(pi: ExtensionAPI): void {
         state.enabled = word === "" ? !state.enabled : word === "on";
         if (!state.enabled) {
           state.strict = false;
+          state.mode = "operational";
+          state.authoredPath = undefined;
           state.pending = [];
           state.warnings.clear();
           state.notes = 0;
         }
       } else {
-        ctx.ui.notify("Usage: /ste [on|off|status|strict|strict on|strict off]", "warning");
+        ctx.ui.notify("Usage: /ste [on|off|status|strict [on|off]|mode operational|mode authored [document-path]]", "warning");
         return;
       }
-      ctx.ui.setStatus("ste", state.enabled ? (state.strict ? "◆ STE strict" : "○ STE") : undefined);
-      ctx.ui.notify(!state.enabled ? "STE disabled" : state.strict
-        ? "STE strict: send every reply through say. Direct replies are not blocked by omp."
-        : "STE enabled", "info");
+      start(ctx);
+      ctx.ui.notify(!state.enabled ? "STE disabled" :
+        `STE task mode: ${state.mode}. ${state.strict ? "Strict replies use say." : "Reply checks remain active."}` +
+        (state.authoredPath ? `\nAuthored document: ${state.authoredPath}` : ""), "info");
     },
   });
 
@@ -125,11 +146,15 @@ export default function steExtension(pi: ExtensionAPI): void {
       };
     },
   });
+  const sayParameters = pi.zod.object({
+    text: pi.zod.string().describe("The text to check or send"),
+    authored: pi.zod.boolean().optional().describe("True only for requested authored prose in authored mode"),
+  });
   pi.registerTool({
     name: "say",
     label: "Say",
-    description: "Send prose to the user. In STE strict mode, use this for every reply. A hard STE violation blocks the call.",
-    parameters,
+    description: "Send prose to the user. Strict mode uses this for every reply. Only authored mode accepts authored output.",
+    parameters: sayParameters,
     approval: "read",
     loadMode: "essential",
     async execute(_id, params) {
@@ -141,7 +166,8 @@ export default function steExtension(pi: ExtensionAPI): void {
 
   function start(ctx: ExtensionContext): void {
     const state = stateFor(ctx);
-    ctx.ui.setStatus("ste", state.enabled ? (state.strict ? "◆ STE strict" : "○ STE") : undefined);
+    ctx.ui.setStatus("ste", state.enabled ?
+      `${state.strict ? "◆" : "○"} STE ${state.mode === "authored" ? "AUTH" : "OPS"}` : undefined);
   }
   pi.on("session_start", (_event, ctx) => { start(ctx); });
   pi.on("session_switch", (_event, ctx) => { start(ctx); });
@@ -160,13 +186,41 @@ export default function steExtension(pi: ExtensionAPI): void {
   pi.on("before_agent_start", (event, ctx) => {
     const state = stateFor(ctx);
     if (!state.enabled) return;
-    return { systemPrompt: [...event.systemPrompt, promptText(state.engine), ...(state.strict ? [STRICT_NOTE] : [])] };
+    let language = promptText(state.engine);
+    const notes: string[] = [];
+    if (state.mode === "authored") {
+      language = language.replace(
+        "Write every reply, comment, document, UI string and commit message in\nSimplified Technical English.",
+        "Write operational replies, instructions, comments, UI strings and commit messages in Simplified Technical English.\n" +
+        "Apply these rules to documents except the selected authored document.\n" +
+        "The selected authored document and say calls with authored=true use the requested writing voice instead.",
+      );
+      notes.push(
+        "## Task mode: authored",
+        "Use authored prose only for the writing task that the user requested.",
+        "Send authored output through say with authored=true. Keep routine chat, status, and instructions in STE.",
+        state.authoredPath ? `Selected authored document: ${JSON.stringify(state.authoredPath)}.` :
+          "No authored document is selected. All file checks remain active.",
+        "Code comments and commit messages keep STE checks. ste_lint still checks any text that you submit.",
+        "Do not change safety rules or independent host instructions. Return to operational mode after the authored task.",
+      );
+    }
+    return { systemPrompt: [...event.systemPrompt, language, ...notes, ...(state.strict ? [STRICT_NOTE] : [])] };
   });
 
   pi.on("tool_call", (event, ctx) => {
     const state = stateFor(ctx);
     if (!state.enabled) return;
-    const targets = subjectsOf(event.toolName, event.input as Record<string, unknown>);
+    const input = event.input as Record<string, unknown>;
+    if (event.toolName === "say" && input.authored === true) {
+      if (state.mode === "authored") return;
+      return { block: true, reason: "Only authored mode accepts authored output." };
+    }
+    const targets = subjectsOf(event.toolName, input).filter(target =>
+      !(state.mode === "authored" && state.authoredPath &&
+        (event.toolName === "write" || event.toolName === "edit") &&
+        !target.label.includes("://") &&
+        resolve(ctx.cwd, target.label.startsWith("~/") ? resolve(homedir(), target.label.slice(2)) : target.label) === state.authoredPath));
     if (targets.length === 0) return;
     const results = targets.map(target => ({ target, result: check(state.engine, target) }));
     report(ctx, results.flatMap(({ result }) => result.violations));

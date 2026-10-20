@@ -39,24 +39,33 @@ You can disable individual rules without disabling the other checks.
 
 ## Install
 
-With omp installed, run:
+Install directly from GitHub. You do not need to clone the repository or install dependencies.
 
 ```sh
-git clone https://github.com/fonnesbeck/omp-ste.git
-omp plugin install ./omp-ste
+omp plugin install github:fonnesbeck/omp-ste#main
 ```
 
-The install links to this directory, so keep the directory in place.
-You do not need to run `bun install` or `bun link`.
+To refresh an existing installation from the current main branch, run:
 
-Start `omp` as usual, then enter `/ste status` to check that the plugin loaded.
+```sh
+omp plugin install github:fonnesbeck/omp-ste#main --force
+```
+
+Restart OMP after installation or an update. Enter `/ste status` to check that the plugin loaded.
 Checks start enabled in each new session. Strict reply mode starts disabled.
 
-To try the plugin for one session without installing it:
+Installation does not change your status-bar settings. By default, OMP shows the STE label below the prompt.
+Follow the [Status bar](#status-bar) instructions to move it inside the bar.
+A separate label does not mean installation failed.
+
+For local development, you can link an existing checkout instead:
 
 ```sh
-omp --extension /absolute/path/to/omp-ste
+omp plugin install /absolute/path/to/omp-ste
 ```
+
+Keep that directory in place. OMP loads the plugin from it, including uncommitted changes.
+To return to the GitHub version, use the refresh command above.
 
 Verified with the unmodified omp 18.12.2 executable and the stock 18.12.1 SDK.
 
@@ -94,8 +103,9 @@ The status shows the result of the most recent automatic check, not the whole se
 
 | Display | Meaning |
 |---|---|
-| `○ STE` | Checks enabled, no result yet |
-| `◆ STE strict` | Strict reply mode selected |
+| `○ STE OPS` | Checks enabled in operational mode, no result yet |
+| `○ STE AUTH` | Checks enabled in authored mode, no result yet |
+| `◆ STE OPS` or `◆ STE AUTH` | Strict reply checks in the selected mode |
 | `✓ STE` | The last check found no violations |
 | `× STE: 2 hard / 1 soft` | The last check found hard violations |
 | `△ STE: 0 hard / 1 soft` | The last check found warnings only |
@@ -138,6 +148,8 @@ Enter these commands in omp:
 | `/ste status` | Show the current mode, custom rule settings, and configuration errors |
 | `/ste strict` or `/ste strict on` | Enable checks and ask the agent to submit replies through `say` |
 | `/ste strict off` | Stop asking for replies through `say`, without disabling other checks |
+| `/ste mode operational` | Enable normal checks and clear the authored selection |
+| `/ste mode authored [document-path]` | Enable authored output and select one optional local document |
 
 ### Strict mode checks replies before sending them
 
@@ -155,6 +167,61 @@ the call is blocked. Strict mode is not a way to keep rejected text secret.
 The agent also gets `ste_lint`, a tool for checking a draft without sending it
 or writing a file. This tool remains available when automatic checks are off.
 You do not need to call either tool yourself.
+
+### Authored writing mode
+
+Operational mode is the default. It applies STE checks to all supported text.
+Authored mode allows an explicit exception for a requested article, tutorial, talk, or other authored piece.
+
+Use authored mode only when the user requests an authored voice.
+Document length and prompt text never select the mode automatically.
+Do not disable all checks with `/ste off` for authored work.
+
+Enter `/ste mode authored` for marked output only.
+Add one document path to allow authored prose in that file.
+Each command replaces the previous file selection.
+
+```text
+/ste mode authored
+/ste mode authored docs/Article Draft.md
+/ste status
+/ste mode operational
+```
+
+The path accepts `.md`, `.mdx`, `.markdown`, `.txt`, and `.rst` files.
+Use a relative path, an absolute path, or a path that starts with `~/`.
+Spaces are literal, so do not add quotes.
+
+This exception supports local paths only. It compares normalized paths, not symlink targets.
+Other files still get the normal checks.
+
+The agent sends the authored piece through `say` with `authored` set to `true`.
+Ordinary `say` calls and direct chat still get STE checks.
+Authored output outside `say` is not exempt.
+
+```json
+{"text": "The bar strip isn't fancy. That's the feature.", "authored": true}
+```
+
+In operational mode, the plugin rejects `say` calls marked `authored`.
+Existing callers can omit the optional field.
+The `ste_lint` tool always checks the text that it receives.
+
+Source comments, commit messages, operational instructions, and status text keep STE checks in authored mode.
+Strict reply mode remains independent.
+Task mode commands enable checks without changing the strict reply setting.
+
+The command changes checks immediately, and the next prompt gets the new mode instructions.
+New sessions and plugin reloads start in operational mode.
+The `off` command also clears the authored selection.
+
+Use `/ste mode operational` after the authored task.
+Start a new OMP process after you update this plugin.
+An existing process can retain old plugin code and instructions.
+
+This mode changes only this plugin's checks and language prompt.
+It does not override independent host or developer instructions, permissions, safety rules, or tool checks.
+If the host demands STE for every output, its instructions must allow the authored exception before you use this mode.
 
 ## Choose which rules to enforce
 

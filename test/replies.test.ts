@@ -7,7 +7,7 @@ import { initializeExtensions } from "@oh-my-pi/pi-coding-agent/modes/runtime-in
 import { createMockModel } from "@oh-my-pi/pi-ai/providers/mock";
 import ste from "../src/index.ts";
 
-test("normal replies stay intact and hard and soft feedback reaches the next prompt without an extra turn", async () => {
+test.each(["operational", "authored"])("operational replies keep feedback in %s mode", async mode => {
   const directory = await mkdtemp(join(tmpdir(), "omp-ste-reply-"));
   const previous = { XDG_CONFIG_HOME: process.env.XDG_CONFIG_HOME, STE_CONFIG: process.env.STE_CONFIG };
   process.env.XDG_CONFIG_HOME = join(directory, "config");
@@ -31,6 +31,7 @@ test("normal replies stay intact and hard and soft feedback reaches the next pro
       reportRuntimeError: error => { throw new Error(error.error); },
     });
     session.agent.streamFn = model.stream;
+    await session.prompt(`/ste mode ${mode}`);
     await session.prompt("Explain the tool.");
     const reply = session.messages.find(message => message.role === "assistant");
     expect(reply?.content).toEqual([{ type: "text", text: firstReply }]);

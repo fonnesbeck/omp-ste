@@ -28,7 +28,7 @@ async function withSession(
       extensions: [ste], disableExtensionDiscovery: true, preloadedCustomToolPaths: [],
       enableMCP: false, enableLsp: false, enableIrc: false, skipPythonPreflight: true,
       skills: [], rules: [], contextFiles: [], promptTemplates: [], slashCommands: [],
-      toolNames: ["read", "write", "edit"], autoApprove: true, bindProcessState: false,
+      toolNames: ["read", "write", "edit", "bash"], autoApprove: true, bindProcessState: false,
     }));
     await initializeExtensions(session, {
       reportSendError: (_action, error) => { throw error; },
@@ -122,5 +122,90 @@ test("stock hashline edit is blocked before it changes a file", async () => {
     expect(result(session, "edit").isError).toBe(true);
     expect(JSON.stringify(result(session, "edit").content)).toContain("[style/semicolon]");
     expect(await readFile(path, "utf8")).toBe("Open the valve.\n");
+  });
+});
+
+test("authored mode exempts only marked output and the selected document", async () => {
+  const prose = "The bar strip isn't fancy; that's the feature.";
+  await withSession([
+    ...call("default", "say", { text: prose, authored: true }),
+    ...call("authored", "say", { text: prose, authored: true }),
+    ...call("status", "say", { text: prose }),
+    ...call("no-path", "write", { path: "Article Draft.md", content: prose }),
+    ...call("article", "write", { path: "Article Draft.md", content: prose }),
+    ...call("other", "write", { path: "notes.md", content: prose }),
+    ...call("comment", "write", { path: "code.ts", content: "// Open the valve; close the cover.\n" }),
+    ...call("commit", "bash", { command: 'git commit -m "Open the valve; close the cover."' }),
+    ...call("reset-file", "write", { path: "Article Draft.md", content: prose }),
+    ...call("reset-reply", "say", { text: prose, authored: true }),
+    ...call("reset-off", "say", { text: prose, authored: true }),
+  ], async (session, directory) => {
+    await session.prompt("Send the authored reply.");
+    expect(result(session, "default").isError).toBe(true);
+    await session.prompt("/ste strict");
+    await session.prompt("/ste mode authored");
+    await session.prompt("Send the authored reply.");
+    expect(result(session, "authored").isError).toBe(false);
+    expect(result(session, "authored").content).toEqual([{ type: "text", text: prose }]);
+    await session.prompt("Send the status reply.");
+    expect(result(session, "status").isError).toBe(true);
+    await session.prompt("Write the authored text.");
+    expect(result(session, "no-path").isError).toBe(true);
+    await session.prompt(`/ste mode authored ${join(directory, "Article Draft.md")}`);
+    await session.prompt("Write the authored text.");
+    expect(result(session, "article").isError).toBe(false);
+    expect(await readFile(join(directory, "Article Draft.md"), "utf8")).toBe(prose);
+    await session.prompt("Write the operational notes.");
+    expect(result(session, "other").isError).toBe(true);
+    await session.prompt("/ste mode authored code.ts");
+    await session.prompt("Write the code comment.");
+    expect(result(session, "comment").isError).toBe(true);
+    await session.prompt("Commit the change.");
+    expect(result(session, "commit").isError).toBe(true);
+    await session.prompt("/ste mode operational");
+    await session.prompt("Write the authored text.");
+    expect(result(session, "reset-file").isError).toBe(true);
+    await session.prompt("Send the authored reply.");
+    expect(result(session, "reset-reply").isError).toBe(true);
+    await session.prompt("/ste mode authored");
+    await session.prompt("/ste off");
+    await session.prompt("/ste on");
+    await session.prompt("Send the authored reply.");
+    expect(result(session, "reset-off").isError).toBe(true);
+  });
+});
+
+test("authored edits keep checks for other files", async () => {
+  await withSession([
+    { content: [{ type: "toolCall", id: "read-article", name: "read", arguments: { path: "article.md" } }] },
+    context => {
+      const read = context.messages.find(message => message.role === "toolResult" && message.toolCallId === "read-article");
+      const tag = JSON.stringify(read).match(/#([0-9A-F]{4})\]/)?.[1];
+      if (!tag) throw new Error("The stock read tool did not return a snapshot tag.");
+      return { content: [{ type: "toolCall", id: "edit-article", name: "edit", arguments: {
+        input: `*** Begin Patch\n[article.md#${tag}]\nPUT 1.=1:\n+Open the valve; close the cover.\n*** End Patch`,
+      } }] };
+    },
+    { content: ["Done."] },
+    { content: [{ type: "toolCall", id: "read-notes", name: "read", arguments: { path: "notes.md" } }] },
+    context => {
+      const read = context.messages.find(message => message.role === "toolResult" && message.toolCallId === "read-notes");
+      const tag = JSON.stringify(read).match(/#([0-9A-F]{4})\]/)?.[1];
+      if (!tag) throw new Error("The stock read tool did not return a snapshot tag.");
+      return { content: [{ type: "toolCall", id: "edit-notes", name: "edit", arguments: {
+        input: `*** Begin Patch\n[notes.md#${tag}]\nPUT 1.=1:\n+Open the valve; close the cover.\n*** End Patch`,
+      } }] };
+    },
+    { content: ["Done."] },
+  ], async (session, directory) => {
+    await writeFile(join(directory, "article.md"), "Open the valve.\n");
+    await writeFile(join(directory, "notes.md"), "Open the valve.\n");
+    await session.prompt("/ste mode authored ./article.md");
+    await session.prompt("Read and edit the article.");
+    expect(result(session, "edit-article").isError).toBe(false);
+    expect(await readFile(join(directory, "article.md"), "utf8")).toBe("Open the valve; close the cover.\n");
+    await session.prompt("Read and edit the notes.");
+    expect(result(session, "edit-notes").isError).toBe(true);
+    expect(await readFile(join(directory, "notes.md"), "utf8")).toBe("Open the valve.\n");
   });
 });
