@@ -7,6 +7,7 @@ import {
   type Config, type Engine, type Violation,
 } from "./engine.ts";
 import { subjectsOf } from "./subjects.ts";
+import { configureStatusBar } from "./status.ts";
 
 const STRICT_NOTE = [
   "## Simplified Technical English: strict mode",
@@ -30,7 +31,11 @@ interface State {
 }
 
 /** A port of agent-ste's pi extension, using only stock omp extension hooks. */
-export default function steExtension(pi: ExtensionAPI): void {
+export default async function steExtension(pi: ExtensionAPI): Promise<void> {
+  if (pi.pi.Settings.current) {
+    await pi.pi.Settings.current;
+    await configureStatusBar(pi, process.cwd());
+  }
   const states = new Map<string, State>();
 
   function stateFor(ctx: ExtensionContext): State {

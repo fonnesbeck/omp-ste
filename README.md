@@ -42,30 +42,21 @@ You can disable individual rules without disabling the other checks.
 Install directly from GitHub. You do not need to clone the repository or install dependencies.
 
 ```sh
-omp plugin install github:fonnesbeck/omp-ste#e4554c6e0a28dce7ba68b2b5b3e8e45112c39c62
+omp plugin install github:fonnesbeck/omp-ste#main
 ```
 
 To replace an existing installation with this revision, run:
 
 ```sh
-omp plugin install github:fonnesbeck/omp-ste#e4554c6e0a28dce7ba68b2b5b3e8e45112c39c62 --force
+omp plugin install github:fonnesbeck/omp-ste#main --force
 ```
 
 Restart OMP after installation or an update. Enter `/ste status` to check that the plugin loaded.
 Checks start enabled in each new session. Strict reply mode starts disabled.
 
-These commands select an exact commit rather than a cached branch reference.
-This revision includes the compact labels and authored mode. Its package version remains `0.2.0`.
-
-After restart, `/ste on` should show `○ STE OPS`.
-If it shows only `○ STE`, OMP loaded an older copy.
-
-Use `omp plugin list --json` to find installed plugin paths.
-Check explicit `--extension` arguments and configured extension paths for another copy.
-
-Installation does not change your status-bar settings. By default, OMP shows the STE label below the prompt.
-Follow the [Status bar](#status-bar) instructions to move it inside the bar.
-A separate label does not mean installation failed.
+The installer should report `omp-ste@0.2.1`.
+After restart, `/ste on` shows `○ STE OPS` inside the native status bar.
+No separate configuration step is needed.
 
 For local development, you can link an existing checkout instead:
 
@@ -122,28 +113,13 @@ The status shows the result of the most recent automatic check, not the whole se
 `/ste off` removes the status. A check result replaces the mode label without changing the mode.
 Use `/ste status` to see the current mode.
 
-OMP normally shows plugin status text below the prompt.
-To put it inside the native status bar, use a custom layout with the `status` segment.
-Set `statusLine.showHookStatus` to `false` to remove the separate row.
+The plugin configures the native status bar when OMP loads it.
+It keeps your current segments, adds `status` if absent, and disables the separate status row.
+For a built-in preset, it saves an equivalent custom layout.
 
-This example keeps the default OMP 18.12 layout and adds status text on the right.
-Merge it into your OMP configuration, or add `status` to your existing custom segment list.
-
-```yaml
-statusLine:
-  preset: custom
-  leftSegments: [pi, vim, model, mode, collab, stream, path, git, pr, context_pct, cost]
-  rightSegments: [session_name, status]
-  separator: powerline-thin
-  segmentOptions:
-    model: {showThinkingLevel: true}
-    path: {abbreviate: true, maxLength: 40, stripWorkPrefix: true}
-    git: {showBranch: true, showStaged: true, showUnstaged: true, showUntracked: true}
-  showHookStatus: false
-```
-
-The native segment uses your OMP theme and includes status text from all plugins.
-The plugin does not change your OMP settings or replace its status bar.
+This setup uses stock `omp config` commands and saves the status-bar settings in your OMP configuration.
+The native segment uses your theme and includes status text from all plugins.
+The plugin does not replace the status bar or patch OMP.
 
 ## Session commands
 

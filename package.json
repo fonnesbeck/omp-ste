@@ -1,6 +1,6 @@
 {
   "name": "omp-ste",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "description": "Self-contained agent-ste plugin for stock omp",
   "type": "module",
   "license": "MIT",
