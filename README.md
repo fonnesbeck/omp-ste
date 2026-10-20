@@ -42,17 +42,26 @@ You can disable individual rules without disabling the other checks.
 Install directly from GitHub. You do not need to clone the repository or install dependencies.
 
 ```sh
-omp plugin install github:fonnesbeck/omp-ste#main
+omp plugin install github:fonnesbeck/omp-ste#e4554c6e0a28dce7ba68b2b5b3e8e45112c39c62
 ```
 
-To refresh an existing installation from the current main branch, run:
+To replace an existing installation with this revision, run:
 
 ```sh
-omp plugin install github:fonnesbeck/omp-ste#main --force
+omp plugin install github:fonnesbeck/omp-ste#e4554c6e0a28dce7ba68b2b5b3e8e45112c39c62 --force
 ```
 
 Restart OMP after installation or an update. Enter `/ste status` to check that the plugin loaded.
 Checks start enabled in each new session. Strict reply mode starts disabled.
+
+These commands select an exact commit rather than a cached branch reference.
+This revision includes the compact labels and authored mode. Its package version remains `0.2.0`.
+
+After restart, `/ste on` should show `○ STE OPS`.
+If it shows only `○ STE`, OMP loaded an older copy.
+
+Use `omp plugin list --json` to find installed plugin paths.
+Check explicit `--extension` arguments and configured extension paths for another copy.
 
 Installation does not change your status-bar settings. By default, OMP shows the STE label below the prompt.
 Follow the [Status bar](#status-bar) instructions to move it inside the bar.
