@@ -87,7 +87,7 @@ The plugin distinguishes two kinds of violation:
 
 - **Hard:** blocks a checked write, edit, message command, or `say` call.
   The agent receives the rule name, text position, and suggested correction.
-- **Soft:** shows a warning but lets the action continue.
+- **Soft:** sends a warning to the agent without showing it in the console, and lets the action continue.
 
 Ordinary chat replies work differently. You see the original reply, and the
 agent receives feedback to help it write its next reply. The plugin does not

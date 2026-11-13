@@ -75,7 +75,8 @@ test("stock write blocks prose before mutation, permits code, and reports soft f
     await session.prompt("Write the revised notes.");
     expect(result(session, "warned").isError).toBe(false);
     expect(await readFile(path, "utf8")).toBe("The robust tool works.");
-    expect(JSON.stringify(result(session, "warned").content)).toContain("[style/marketing]");
+    expect(JSON.stringify(result(session, "warned").content)).not.toContain("[style/marketing]");
+    expect(JSON.stringify(session.messages.filter(m => m.role === "developer"))).toContain("[style/marketing]");
   });
 });
 
@@ -100,7 +101,8 @@ test("say blocks hard faults, delivers approved replies, and hides STE diagnosti
     await session.prompt("Send the warned reply.");
     const warned = result(session, "warned-reply");
     expect(warned.isError).toBe(false);
-    expect(JSON.stringify(warned.content)).toContain("[style/marketing]");
+    expect(warned.content).toEqual([{ type: "text", text: "The robust tool works." }]);
+    expect(JSON.stringify(session.messages.filter(m => m.role === "developer"))).toContain("[style/marketing]");
     const warnedCard = new ToolExecutionComponent("say", { text: "The robust tool works." }, {}, tool, ui, directory, "warned-reply");
     warnedCard.updateResult(warned, false, "warned-reply");
     const renderedWarned = warnedCard.render(80).join("\n");
@@ -120,7 +122,8 @@ test("project severity overrides control the real file gate", async () => {
       await session.prompt("Write the notes.");
       expect(result(session, "soft").isError).toBe(false);
       expect(await readFile(join(directory, "notes.md"), "utf8")).toBe("Open the valve; close the cover.");
-      expect(JSON.stringify(result(session, "soft").content)).toContain("[style/semicolon]");
+      expect(JSON.stringify(result(session, "soft").content)).not.toContain("[style/semicolon]");
+      expect(JSON.stringify(session.messages.filter(m => m.role === "developer"))).toContain("[style/semicolon]");
     }, { "style/semicolon": "soft" });
 });
 

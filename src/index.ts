@@ -27,7 +27,6 @@ interface State {
   authoredPath?: string;
   pending: Violation[];
   notes: number;
-  warnings: Map<string, string>;
 }
 
 /** A port of agent-ste's pi extension, using only stock omp extension hooks. */
@@ -52,7 +51,7 @@ export default async function steExtension(pi: ExtensionAPI): Promise<void> {
         ctx.ui.notify(`STE config: ${fault}. Using built-in severities.`, "warning");
       }
       state = { engine: newEngine(config), fault, enabled: true, strict: false, mode: "operational",
-        pending: [], notes: 0, warnings: new Map() };
+        pending: [], notes: 0 };
       states.set(id, state);
     }
     return state;
@@ -120,7 +119,6 @@ export default async function steExtension(pi: ExtensionAPI): Promise<void> {
           state.mode = "operational";
           state.authoredPath = undefined;
           state.pending = [];
-          state.warnings.clear();
           state.notes = 0;
         }
       } else {
@@ -186,7 +184,6 @@ export default async function steExtension(pi: ExtensionAPI): Promise<void> {
   pi.on("session_tree", (_event, ctx) => {
     const state = stateFor(ctx);
     state.pending = [];
-    state.warnings.clear();
     state.notes = 0;
   });
   pi.on("session_shutdown", (_event, ctx) => {
@@ -240,15 +237,8 @@ export default async function steExtension(pi: ExtensionAPI): Promise<void> {
     const warnings = results.filter(({ result }) => result.soft.length > 0)
       .map(({ target, result }) => warnReason(target.label, result.soft));
     if (warnings.length) {
-      state.warnings.set(event.toolCallId, warnings.join("\n\n"));
+      return { additionalContext: warnings.join("\n\n") };
     }
-  });
-  pi.on("tool_result", (event, ctx) => {
-    const state = stateFor(ctx);
-    const warning = state.warnings.get(event.toolCallId);
-    if (warning === undefined) return;
-    state.warnings.delete(event.toolCallId);
-    return { content: [...event.content, { type: "text" as const, text: warning }] };
   });
 
   pi.on("message_end", (event, ctx) => {
@@ -270,6 +260,5 @@ export default async function steExtension(pi: ExtensionAPI): Promise<void> {
     if (!state.enabled || event.willContinue) return;
     flush(state, "nextTurn");
     state.notes = 0;
-    state.warnings.clear();
   });
 }
