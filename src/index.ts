@@ -167,8 +167,12 @@ export default async function steExtension(pi: ExtensionAPI): Promise<void> {
     async execute(_id, params) {
       return { content: [{ type: "text", text: params.text }], details: {} };
     },
-    renderCall: () => new pi.pi.Text("Say", 0, 0),
-    renderResult: (result) => new pi.pi.Text(result.content.filter(part => part.type === "text").map(part => part.text).join("\n"), 0, 0),
+    renderCall: () => new pi.pi.Text("", 0, 0),
+    renderResult: (result) => {
+      if (result.isError) return new pi.pi.Text("", 0, 0);
+      const text = result.content.find((part): part is { type: "text"; text: string } => part.type === "text")?.text ?? "";
+      return new pi.pi.Text(text, 0, 0);
+    },
   });
 
   function start(ctx: ExtensionContext): void {
@@ -236,9 +240,7 @@ export default async function steExtension(pi: ExtensionAPI): Promise<void> {
     const warnings = results.filter(({ result }) => result.soft.length > 0)
       .map(({ target, result }) => warnReason(target.label, result.soft));
     if (warnings.length) {
-      const warning = warnings.join("\n\n");
-      state.warnings.set(event.toolCallId, warning);
-      ctx.ui.notify(warning, "warning");
+      state.warnings.set(event.toolCallId, warnings.join("\n\n"));
     }
   });
   pi.on("tool_result", (event, ctx) => {

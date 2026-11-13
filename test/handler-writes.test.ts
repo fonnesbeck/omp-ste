@@ -2,7 +2,7 @@ import { expect, test } from "bun:test";
 import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { AuthStorage, createAgentSession, SessionManager, Settings, type AgentSession } from "@oh-my-pi/pi-coding-agent";
+import { AuthStorage, createAgentSession, SessionManager, Settings, ToolExecutionComponent, type AgentSession } from "@oh-my-pi/pi-coding-agent";
 import { initializeExtensions } from "@oh-my-pi/pi-coding-agent/modes/runtime-init";
 import { createMockModel, type MockHandler, type MockResponse } from "@oh-my-pi/pi-ai/providers/mock";
 import ste from "../src/index.ts";
@@ -79,14 +79,35 @@ test("stock write blocks prose before mutation, permits code, and reports soft f
   });
 });
 
-test("say blocks hard faults and delivers an approved reply without rewriting it", async () => {
+test("say blocks hard faults, delivers approved replies, and hides STE diagnostics from console output", async () => {
   await withSession([
     ...call("blocked-reply", "say", { text: "Open the valve; close the cover." }),
+    ...call("warned-reply", "say", { text: "The robust tool works." }),
     ...call("approved-reply", "say", { text: "Open the valve." }),
-  ], async session => {
+  ], async (session, directory) => {
+    const ui = { requestRender() {}, requestComponentRender() {}, resetDisplay() {} };
+    const tool = session.getToolByName("say");
+
     await session.prompt("Send the reply.");
-    expect(result(session, "blocked-reply").isError).toBe(true);
-    expect(JSON.stringify(result(session, "blocked-reply").content)).toContain("[style/semicolon]");
+    const blocked = result(session, "blocked-reply");
+    expect(blocked.isError).toBe(true);
+    expect(JSON.stringify(blocked.content)).toContain("[style/semicolon]");
+    const blockedCard = new ToolExecutionComponent("say", { text: "Open the valve; close the cover." }, {}, tool, ui, directory, "blocked-reply");
+    expect(blockedCard.render(80)).toEqual([]);
+    blockedCard.updateResult(blocked, false, "blocked-reply");
+    expect(blockedCard.render(80)).toEqual([]);
+
+    await session.prompt("Send the warned reply.");
+    const warned = result(session, "warned-reply");
+    expect(warned.isError).toBe(false);
+    expect(JSON.stringify(warned.content)).toContain("[style/marketing]");
+    const warnedCard = new ToolExecutionComponent("say", { text: "The robust tool works." }, {}, tool, ui, directory, "warned-reply");
+    warnedCard.updateResult(warned, false, "warned-reply");
+    const renderedWarned = warnedCard.render(80).join("\n");
+    expect(renderedWarned).toContain("The robust tool works.");
+    expect(renderedWarned).not.toContain("Simplified Technical English");
+    expect(renderedWarned).not.toContain("[style/marketing]");
+
     await session.prompt("Send the revised reply.");
     expect(result(session, "approved-reply").isError).toBe(false);
     expect(result(session, "approved-reply").content).toEqual([{ type: "text", text: "Open the valve." }]);
