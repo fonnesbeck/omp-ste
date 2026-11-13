@@ -54,7 +54,7 @@ omp plugin install github:fonnesbeck/omp-ste#main --force
 Restart OMP after installation or an update. Enter `/ste status` to check that the plugin loaded.
 Checks start enabled in each new session. Strict reply mode starts disabled.
 
-The installer should report `omp-ste@0.2.1`.
+The installer should report `omp-ste@0.2.2`.
 After restart, `/ste on` shows `○ STE OPS` inside the native status bar.
 No separate configuration step is needed.
 
