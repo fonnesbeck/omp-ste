@@ -72,7 +72,7 @@ export default async function steExtension(pi: ExtensionAPI): Promise<void> {
       customType: "ste-violation",
       content: `Your previous reply broke Simplified Technical English ${violations.length} time(s):\n` +
         `${format(violations)}\nCorrect this in your next reply. Do not apologise for it.`,
-      display: true,
+      display: false,
       details: { violations },
     }, { deliverAs: mode });
   }
@@ -150,6 +150,8 @@ export default async function steExtension(pi: ExtensionAPI): Promise<void> {
         details: { violations },
       };
     },
+    renderCall: () => new pi.pi.Text("", 0, 0),
+    renderResult: () => new pi.pi.Text("", 0, 0),
   });
   const sayParameters = pi.zod.object({
     text: pi.zod.string().describe("The text to check or send"),
